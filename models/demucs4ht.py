@@ -439,12 +439,30 @@ class HTDemucs(nn.Module):
         assert hl == nfft // 4
         le = int(math.ceil(x.shape[-1] / hl))
         pad = hl // 2 * 3
+        
+        # Store original dtype and convert to float32 for padding
+        original_dtype = x.dtype
+        x = x.float()
         x = pad1d(x, (pad, pad + le * hl - x.shape[-1]), mode="reflect")
-
-        # Convert to float32 for STFT operations, spectro function handles this internally
-        z = spectro(x, nfft, hl)[..., :-1, :]
+        
+        # Convert to float32 for STFT operations
+        z = spectro(x, nfft, hl)
+        # Convert to real/imaginary parts before slicing
+        z = torch.view_as_real(z)
+        z = z[..., :-1, :, :]
+        # Convert back to complex using our own implementation
+        z_real = z[..., 0]
+        z_imag = z[..., 1]
+        z = torch.complex(z_real, z_imag)
+        # Convert back to original dtype
+        #z = z.to(torch.cfloat)
+        
         assert z.shape[-1] == le + 4, (z.shape, x.shape, le)
-        z = z[..., 2: 2 + le]
+        # Split into real and imaginary parts before slicing
+        z_real = z.real[..., 2: 2 + le]
+        z_imag = z.imag[..., 2: 2 + le]
+        # Recombine into complex tensor
+        z = torch.complex(z_real, z_imag)
         return z
 
     def _ispec(self, z, length=None, scale=0):
@@ -494,7 +512,13 @@ class HTDemucs(nn.Module):
 
         B, S, C, Fq, T = mag_out.shape
         mag_out = mag_out.permute(0, 4, 3, 2, 1)
-        mix_stft = torch.view_as_real(mix_stft.permute(0, 3, 2, 1))
+
+        print(mix_stft.shape)
+        
+        # Convert complex to real/imaginary parts
+        mix_stft_real = mix_stft.real.permute(0, 3, 2, 1)
+        mix_stft_imag = mix_stft.imag.permute(0, 3, 2, 1)
+        mix_stft = torch.stack([mix_stft_real, mix_stft_imag], dim=-1)
 
         outs = []
         for sample in range(B):
@@ -502,15 +526,18 @@ class HTDemucs(nn.Module):
             out = []
             for pos in range(0, T, wiener_win_len):
                 frame = slice(pos, pos + wiener_win_len)
+                # Slice real and imaginary parts separately
+                mag_out_frame = mag_out[sample, frame]
+                mix_stft_frame = mix_stft[sample, frame]
+                
                 z_out = wiener(
-                    mag_out[sample, frame],
-                    mix_stft[sample, frame],
-                    niters,
-                    residual=residual,
-                )
+                    mag_out_frame, mix_stft_frame, niters,
+                    residual=residual)
                 out.append(z_out.transpose(-1, -2))
             outs.append(torch.cat(out, dim=0))
-        out = torch.view_as_complex(torch.stack(outs, 0))
+        
+        # Convert back to complex
+        out = torch.stack(outs, 0)
         out = out.permute(0, 4, 3, 2, 1).contiguous()
         if residual:
             out = out[:, :-1]
@@ -565,7 +592,7 @@ class HTDemucs(nn.Module):
                 # print("Mix: {}".format(mix.shape))
         # print("Length: {}".format(length))
         z = self._spec(mix)
-        # print("Z: {} Type: {}".format(z.shape, z.dtype))
+        print("Z: {} Type: {}".format(z.shape, z.dtype))
         mag = self._magnitude(z)
         x = mag
         # Ensure tensor maintains the model's precision after STFT
@@ -579,19 +606,31 @@ class HTDemucs(nn.Module):
         B, C, Fq, T = x.shape
 
         # unlike previous Demucs, we always normalize because it is easier.
-        mean = x.mean(dim=(1, 2, 3), keepdim=True).to(model_dtype)
-        std = x.std(dim=(1, 2, 3), keepdim=True).to(model_dtype)
-        x = (x - mean) / (torch.tensor(1e-5, dtype=model_dtype, device=x.device) + std)
-        # Ensure tensor maintains the model's precision after normalization
+        # Convert to fp16 before computing statistics
+        print(x.dtype, "x")
+        x = x.to(torch.float32)
+        mean = x.mean(dim=(1, 2, 3), keepdim=True)
+        # std operation produces fp32, so explicitly convert to fp16
+
+        std = x.std(dim=(1, 2, 3), keepdim=True).to(torch.float16)
+        # Ensure epsilon is in fp16
+        epsilon = torch.tensor(1e-5, dtype=torch.float16, device=x.device)
+        print(epsilon.dtype, "epsilon")
+        x = (x - mean) / (epsilon + std)
+        # Convert back to model dtype
         x = x.to(model_dtype)
         # x will be the freq. branch input.
 
         # Prepare the time branch input.
         xt = mix
-        meant = xt.mean(dim=(1, 2), keepdim=True).to(model_dtype)
-        stdt = xt.std(dim=(1, 2), keepdim=True).to(model_dtype)
-        xt = (xt - meant) / (torch.tensor(1e-5, dtype=model_dtype, device=xt.device) + stdt)
-        # Ensure time branch maintains the model's precision
+        xt = xt.to(torch.float32)
+        meant = xt.mean(dim=(1, 2), keepdim=True)
+        # std operation produces fp32, so explicitly convert to fp16
+        stdt = xt.std(dim=(1, 2), keepdim=True).to(torch.float16)
+        # Ensure epsilon is in fp16
+        epsilon = torch.tensor(1e-5, dtype=torch.float16, device=xt.device)
+        xt = (xt - meant) / (epsilon + stdt)
+        # Convert back to model dtype
         xt = xt.to(model_dtype)
         # print("XT: {} Type: {}".format(xt.shape, xt.dtype))
 
@@ -707,11 +746,11 @@ class HTDemucs(nn.Module):
         zout = self._mask(z, x)
         if self.use_train_segment:
             if self.training:
-                x = self._ispec(zout, length)
+                x = zout  # Return spectrogram directly
             else:
-                x = self._ispec(zout, training_length)
+                x = zout  # Return spectrogram directly
         else:
-            x = self._ispec(zout, length)
+            x = zout  # Return spectrogram directly
 
         if self.use_train_segment:
             if self.training:
@@ -722,12 +761,15 @@ class HTDemucs(nn.Module):
             xt = xt.view(B, S, -1, length)
         xt = xt * stdt[:, None] + meant[:, None]
         xt = xt.to(model_dtype)
-        x = xt + x
+        # x = xt + x
         # Ensure final output maintains the model's precision
         x = x.to(model_dtype)
+        xt = xt.to(model_dtype)
         if length_pre_pad:
             x = x[..., :length_pre_pad]
-        return x
+            xt = xt[..., :length_pre_pad]
+            
+        return x, xt  # Return both spectrogram and time branch
 
 
 def get_model(args):
