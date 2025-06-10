@@ -441,6 +441,7 @@ class HTDemucs(nn.Module):
         pad = hl // 2 * 3
         x = pad1d(x, (pad, pad + le * hl - x.shape[-1]), mode="reflect")
 
+        # Convert to float32 for STFT operations, spectro function handles this internally
         z = spectro(x, nfft, hl)[..., :-1, :]
         assert z.shape[-1] == le + 4, (z.shape, x.shape, le)
         z = z[..., 2: 2 + le]
@@ -452,6 +453,7 @@ class HTDemucs(nn.Module):
         z = F.pad(z, (2, 2))
         pad = hl // 2 * 3
         le = hl * int(math.ceil(length / hl)) + 2 * pad
+        # ispectro function handles precision internally
         x = ispectro(z, hl, length=le)
         x = x[..., pad: pad + length]
         return x
@@ -547,6 +549,9 @@ class HTDemucs(nn.Module):
 
     def forward(self, mix):
         length = mix.shape[-1]
+        # Detect the model's parameter precision instead of input precision
+        model_dtype = next(self.parameters()).dtype
+        model_dtype = torch.float16
         length_pre_pad = None
         if self.use_train_segment:
             if self.training:
@@ -563,6 +568,8 @@ class HTDemucs(nn.Module):
         # print("Z: {} Type: {}".format(z.shape, z.dtype))
         mag = self._magnitude(z)
         x = mag
+        # Ensure tensor maintains the model's precision after STFT
+        x = x.to(model_dtype)
         # print("MAG: {} Type: {}".format(x.shape, x.dtype))
 
         if self.num_subbands > 1:
@@ -572,16 +579,21 @@ class HTDemucs(nn.Module):
         B, C, Fq, T = x.shape
 
         # unlike previous Demucs, we always normalize because it is easier.
-        mean = x.mean(dim=(1, 2, 3), keepdim=True)
-        std = x.std(dim=(1, 2, 3), keepdim=True)
-        x = (x - mean) / (1e-5 + std)
+        mean = x.mean(dim=(1, 2, 3), keepdim=True).to(model_dtype)
+        std = x.std(dim=(1, 2, 3), keepdim=True).to(model_dtype)
+        x = (x - mean) / (torch.tensor(1e-5, dtype=model_dtype, device=x.device) + std)
+        # Ensure tensor maintains the model's precision after normalization
+        x = x.to(model_dtype)
         # x will be the freq. branch input.
 
         # Prepare the time branch input.
         xt = mix
-        meant = xt.mean(dim=(1, 2), keepdim=True)
-        stdt = xt.std(dim=(1, 2), keepdim=True)
-        xt = (xt - meant) / (1e-5 + stdt)
+        meant = xt.mean(dim=(1, 2), keepdim=True).to(model_dtype)
+        stdt = xt.std(dim=(1, 2), keepdim=True).to(model_dtype)
+        xt = (xt - meant) / (torch.tensor(1e-5, dtype=model_dtype, device=xt.device) + stdt)
+        # Ensure time branch maintains the model's precision
+        xt = xt.to(model_dtype)
+        # print("XT: {} Type: {}".format(xt.shape, xt.dtype))
 
         # print("XT: {}".format(xt.shape))
 
@@ -597,8 +609,8 @@ class HTDemucs(nn.Module):
                 # we have not yet merged branches.
                 lengths_t.append(xt.shape[-1])
                 tenc = self.tencoder[idx]
-                xt = tenc(xt)
-                # print("Encode XT {}: {}".format(idx, xt.shape))
+                xt = tenc(xt).to(model_dtype)
+                # print("Encode XT {}: {} Type: {}".format(idx, xt.shape, xt.dtype))
                 if not tenc.empty:
                     # save for skip connection
                     saved_t.append(xt)
@@ -606,37 +618,58 @@ class HTDemucs(nn.Module):
                     # tenc contains just the first conv., so that now time and freq.
                     # branches have the same shape and can be merged.
                     inject = xt
-            x = encode(x, inject)
-            # print("Encode X {}: {}".format(idx, x.shape))
+            x = encode(x, inject).to(model_dtype)
+            # print("Encode X {}: {} Type: {}".format(idx, x.shape, x.dtype))
             if idx == 0 and self.freq_emb is not None:
                 # add frequency embedding to allow for non equivariant convolutions
                 # over the frequency axis.
                 frs = torch.arange(x.shape[-2], device=x.device)
-                emb = self.freq_emb(frs).t()[None, :, :, None].expand_as(x)
-                x = x + self.freq_emb_scale * emb
+                emb = self.freq_emb(frs).t()[None, :, :, None].expand_as(x).to(model_dtype)
+                emb_scaled = torch.tensor(self.freq_emb_scale, dtype=model_dtype, device=x.device) * emb
+                x = x + emb_scaled
 
             saved.append(x)
         if self.crosstransformer:
             if self.bottom_channels:
                 b, c, f, t = x.shape
                 x = rearrange(x, "b c f t-> b c (f t)")
-                x = self.channel_upsampler(x)
+                x = self.channel_upsampler(x).to(model_dtype)
+                # print("After channel_upsampler X: {} Type: {}".format(x.shape, x.dtype))
                 x = rearrange(x, "b c (f t)-> b c f t", f=f)
-                xt = self.channel_upsampler_t(xt)
+                xt = self.channel_upsampler_t(xt).to(model_dtype)
+                # print("After channel_upsampler_t XT: {} Type: {}".format(xt.shape, xt.dtype))
 
+            # Ensure inputs to transformer are in correct precision
+            x = x.to(model_dtype)
+            xt = xt.to(model_dtype)
+            # print("Before transformer X: {} Type: {}".format(x.shape, x.dtype))
+            # print("Before transformer XT: {} Type: {}".format(xt.shape, xt.dtype))
+            
             x, xt = self.crosstransformer(x, xt)
-            # print("Cross Tran X {}, XT: {}".format(x.shape, xt.shape))
+            # print("After transformer X: {} Type: {}".format(x.shape, x.dtype))
+            # print("After transformer XT: {} Type: {}".format(xt.shape, xt.dtype))
+            
+            # Ensure transformer outputs are in correct precision
+            x = x.to(model_dtype)
+            xt = xt.to(model_dtype)
 
             if self.bottom_channels:
                 x = rearrange(x, "b c f t-> b c (f t)")
-                x = self.channel_downsampler(x)
+                x = self.channel_downsampler(x).to(model_dtype)
+                # print("After channel_downsampler X: {} Type: {}".format(x.shape, x.dtype))
                 x = rearrange(x, "b c (f t)-> b c f t", f=f)
-                xt = self.channel_downsampler_t(xt)
+                xt = self.channel_downsampler_t(xt).to(model_dtype)
+                # print("After channel_downsampler_t XT: {} Type: {}".format(xt.shape, xt.dtype))
 
         for idx, decode in enumerate(self.decoder):
             skip = saved.pop(-1)
+            # print("Decoder skip: {} Type: {}".format(skip.shape, skip.dtype))
             x, pre = decode(x, skip, lengths.pop(-1))
-            # print('Decode {} X: {}'.format(idx, x.shape))
+            # print("After decode x: {} Type: {}".format(x.shape, x.dtype))
+            if pre is not None:
+                # print("After decode pre: {} Type: {}".format(pre.shape, pre.dtype))
+                pre = pre.to(model_dtype)
+            x = x.to(model_dtype)
             # `pre` contains the output just before final transposed convolution,
             # which is used when the freq. and time branch separate.
 
@@ -668,6 +701,7 @@ class HTDemucs(nn.Module):
 
         x = x.view(B, S, -1, Fq * self.num_subbands, T)
         x = x * std[:, None] + mean[:, None]
+        x = x.to(model_dtype)
         # print("X returned: {}".format(x.shape))
 
         zout = self._mask(z, x)
@@ -687,7 +721,10 @@ class HTDemucs(nn.Module):
         else:
             xt = xt.view(B, S, -1, length)
         xt = xt * stdt[:, None] + meant[:, None]
+        xt = xt.to(model_dtype)
         x = xt + x
+        # Ensure final output maintains the model's precision
+        x = x.to(model_dtype)
         if length_pre_pad:
             x = x[..., :length_pre_pad]
         return x

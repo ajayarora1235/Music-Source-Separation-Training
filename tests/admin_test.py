@@ -21,6 +21,8 @@ MODEL_CONFIGS = {
     'config_musdb18_mel_band_roformer_all_stems.yaml': {'model_type': 'mel_band_roformer'},
     'config_musdb18_scnet.yaml': {'model_type': 'scnet'},
     'config_musdb18_scnet_large.yaml': {'model_type': 'scnet'},
+    'config_v1_apple_model.yaml': {'model_type': 'bs_roformer_apple'},
+    'config_v1_apple_model_fp16.yaml': {'model_type': 'bs_roformer_apple_fp16'},
     # 'config_musdb18_scnet_large_starrytong.yaml': {'model_type': 'scnet'},
     'config_vocals_bandit_bsrnn_multi_mus64.yaml': {'model_type': 'bandit'},
     'config_vocals_bs_roformer.yaml': {'model_type': 'bs_roformer'},

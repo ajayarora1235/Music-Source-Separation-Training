@@ -19,18 +19,21 @@ class FeatureConversion(nn.Module):
 
     def forward(self, x):
         # B, C, F, T = x.shape
+        original_dtype = x.dtype
         if self.inverse:
             x = x.float()
             x_r = x[:, :self.channels // 2, :, :]
             x_i = x[:, self.channels // 2:, :, :]
             x = torch.complex(x_r, x_i)
             x = torch.fft.irfft(x, dim=3, norm="ortho")
+            x = x.to(original_dtype)
         else:
             x = x.float()
             x = torch.fft.rfft(x, dim=3, norm="ortho")
             x_real = x.real
             x_imag = x.imag
             x = torch.cat([x_real, x_imag], dim=1)
+            x = x.to(original_dtype)
         return x
 
 

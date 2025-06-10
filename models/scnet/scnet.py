@@ -325,6 +325,9 @@ class SCNet(nn.Module):
     def forward(self, x):
         # B, C, L = x.shape
         B = x.shape[0]
+        original_dtype = x.dtype
+        x_is_mps = True if x.device.type == "mps" else False
+        
         # In the initial padding, ensure that the number of frames after the STFT (the length of the T dimension) is even,
         # so that the RFFT operation can be used in the separation network.
         padding = self.hop_length - x.shape[-1] % self.hop_length
@@ -339,6 +342,10 @@ class SCNet(nn.Module):
         x = torch.view_as_real(x)
         x = x.permute(0, 3, 1, 2).reshape(x.shape[0] // self.audio_channels, x.shape[3] * self.audio_channels,
                                           x.shape[1], x.shape[2])
+        
+        # Ensure tensor maintains the model's precision after STFT
+        x = x.to(torch.float16)
+        print(f"x.dtype: {x.dtype}")
 
         B, C, Fr, T = x.shape
 
@@ -355,7 +362,7 @@ class SCNet(nn.Module):
         # separation
         x = self.separation_net(x)
 
-        # decoder
+# decoder
         for fusion_layer, su_layer in self.decoder:
             x = fusion_layer(x, save_skip.pop())
             x = su_layer(x, save_lengths.pop(), save_original_lengths.pop())
@@ -365,7 +372,19 @@ class SCNet(nn.Module):
         x = x.view(B, n, -1, Fr, T)
         x = x.reshape(-1, 2, Fr, T).permute(0, 2, 3, 1)
         x = torch.view_as_complex(x.contiguous())
+
+        # same as torch.stft() fix for MacOS MPS above
+        # try:
+        #     # Convert to float32 for ISTFT
+        #     x = x.to(torch.cfloat)
+        #     x = torch.istft(x, **self.stft_config)
+        # except:
+        #     # Ensure all tensors are in the same precision before ISTFT     
+        #     x = x.to(torch.cfloat)
+        #     x = torch.istft(x.cpu() if x_is_mps else x, 
+        #                             **self.stft_config)
         x = torch.istft(x, **self.stft_config)
+        
         x = x.reshape(B, len(self.sources), self.audio_channels, -1)
 
         x = x[:, :, :, :-padding]

@@ -11,6 +11,7 @@ import soundfile as sf
 import numpy as np
 from tqdm.auto import tqdm
 import torch.nn as nn
+import argparse
 
 # Using the embedded version of Python can also correctly import the utils module.
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +48,7 @@ def run_folder(model, args, config, device, verbose: bool = False):
     start_time = time.time()
     model.eval()
 
+    print(f"Processing folder: {args.input_folder}")
     mixture_paths = sorted(glob.glob(os.path.join(args.input_folder, '*.*')))
     sample_rate = getattr(config.audio, 'sample_rate', 44100)
 
@@ -85,6 +87,9 @@ def run_folder(model, args, config, device, verbose: bool = False):
             if config.inference['normalize'] is True:
                 mix, norm_params = normalize_audio(mix)
 
+        # Convert input to tensor and ensure it's in half precision
+        # mix = torch.from_numpy(mix).to(device).half()
+        
         waveforms_orig = demix(config, model, mix, device, model_type=args.model_type, pbar=detailed_pbar)
 
         if args.use_tta:
@@ -92,7 +97,9 @@ def run_folder(model, args, config, device, verbose: bool = False):
 
         if args.extract_instrumental:
             instr = 'vocals' if 'vocals' in instruments else instruments[0]
-            waveforms_orig['instrumental'] = mix_orig - waveforms_orig[instr]
+            # Convert waveforms_orig values to numpy before subtraction
+            waveforms_orig_np = {k: v.cpu().numpy() for k, v in waveforms_orig.items()}
+            waveforms_orig['instrumental'] = mix_orig - waveforms_orig_np[instr]
             if 'instrumental' not in instruments:
                 instruments.append('instrumental')
 
@@ -142,11 +149,48 @@ def proc_folder(dict_args):
 
     print("Instruments: {}".format(config.training.instruments))
 
+    # Convert model to half precision before moving to device
+    model = model.half()
+
     # in case multiple CUDA GPUs are used and --device_ids arg is passed
     if isinstance(args.device_ids, list) and len(args.device_ids) > 1 and not args.force_cpu:
         model = nn.DataParallel(model, device_ids=args.device_ids)
 
     model = model.to(device)
+
+    # Print model precision and parameter information
+    print("\nModel Information:")
+    print("-" * 50)
+    
+    # Count total parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Total parameters: {total_params:,}")
+    
+    # Check parameter precision
+    param_dtypes = {}
+    for name, param in model.named_parameters():
+        dtype = str(param.dtype)
+        if dtype not in param_dtypes:
+            param_dtypes[dtype] = 0
+        param_dtypes[dtype] += param.numel()
+    
+    print("\nParameter precision distribution:")
+    for dtype, count in param_dtypes.items():
+        percentage = (count / total_params) * 100
+        print(f"{dtype}: {count:,} parameters ({percentage:.2f}%)")
+    
+    # Check if model is in eval mode
+    print(f"\nModel in eval mode: {model.training == False}")
+    
+    # Check if model is using mixed precision
+    if hasattr(model, 'half') and any(p.dtype == torch.float16 for p in model.parameters()):
+        print("Model is using mixed precision (FP16)")
+    elif hasattr(model, 'to') and any(p.dtype == torch.int8 for p in model.parameters()):
+        print("Model is using INT8 quantization")
+    else:
+        print("Model is using full precision (FP32)")
+    
+    print("-" * 50 + "\n")
 
     print("Model load time: {:.2f} sec".format(time.time() - model_load_start_time))
 

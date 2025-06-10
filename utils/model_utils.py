@@ -51,7 +51,12 @@ def demix(
         - A numpy array of the separated source if only one instrument is present.
     """
 
-    mix = torch.tensor(mix, dtype=torch.float32)
+    # Ensure mix is a tensor and in the correct precision
+    if not isinstance(mix, torch.Tensor):
+        mix = torch.tensor(mix)
+    
+    # Move to device and convert to half precision
+    # mix = mix.to(device).half()
 
     if model_type == 'htdemucs':
         mode = 'demucs'
@@ -72,7 +77,9 @@ def demix(
         step = chunk_size // num_overlap
         border = chunk_size - step
         length_init = mix.shape[-1]
-        windowing_array = _getWindowingArray(chunk_size, fade_size)
+        # Create windowing array in half precision
+        windowing_array = _getWindowingArray(chunk_size, fade_size).to(device) # .half()
+        
         # Add padding for generic mode to handle edge artifacts
         if length_init > 2 * border and border > 0:
             mix = nn.functional.pad(mix, (border, border), mode="reflect")
@@ -83,10 +90,10 @@ def demix(
 
     with torch.cuda.amp.autocast(enabled=use_amp):
         with torch.inference_mode():
-            # Initialize result and counter tensors
+            # Initialize result and counter tensors in half precision
             req_shape = (num_instruments,) + mix.shape
-            result = torch.zeros(req_shape, dtype=torch.float32)
-            counter = torch.zeros(req_shape, dtype=torch.float32)
+            result = torch.zeros(req_shape, dtype=torch.float32, device=device)
+            counter = torch.zeros(req_shape, dtype=torch.float32, device=device)
 
             i = 0
             batch_data = []
@@ -123,10 +130,10 @@ def demix(
 
                     for j, (start, seg_len) in enumerate(batch_locations):
                         if mode == "generic":
-                            result[..., start:start + seg_len] += x[j, ..., :seg_len].cpu() * window[..., :seg_len]
+                            result[..., start:start + seg_len] += x[j, ..., :seg_len] * window[..., :seg_len]
                             counter[..., start:start + seg_len] += window[..., :seg_len]
                         else:
-                            result[..., start:start + seg_len] += x[j, ..., :seg_len].cpu()
+                            result[..., start:start + seg_len] += x[j, ..., :seg_len]
                             counter[..., start:start + seg_len] += 1.0
 
                     batch_data.clear()
@@ -140,7 +147,7 @@ def demix(
 
             # Compute final estimated sources
             estimated_sources = result / counter
-            estimated_sources = estimated_sources.cpu().numpy()
+            estimated_sources = estimated_sources.cpu().numpy().astype(np.float32)
             np.nan_to_num(estimated_sources, copy=False, nan=0.0)
 
             # Remove padding for generic mode
