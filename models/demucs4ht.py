@@ -23,7 +23,7 @@ from demucs.demucs import rescale_module
 from demucs.states import capture_init
 from demucs.spec import spectro, ispectro
 from demucs.hdemucs import pad1d, ScaledEmbedding, HEncLayer, MultiWrap, HDecLayer
-
+from models.stft_utils import STFT_Process
 
 class HTDemucs(nn.Module):
     """
@@ -424,6 +424,92 @@ class HTDemucs(nn.Module):
         else:
             self.crosstransformer = None
 
+        # Calculate win_length to match _ispec calculations
+        # In _ispec: win_length = n_fft // (1 + pad) where pad = 0
+        win_length = self.nfft  # This matches n_fft // (1 + 0)
+        
+        # Calculate max_frames based on actual segment length
+        # segment is in seconds, samplerate gives samples per second
+        # hop_length is the stride between frames
+        audio_length_samples = int(self.segment * self.samplerate) // 2
+        max_frames = (audio_length_samples // self.hop_length) + 1
+        
+        # Add some buffer for safety (e.g., padding, different scales, variable length inputs)
+        max_frames = int(max_frames * 1.2)  # 20% buffer
+        
+        # Ensure minimum reasonable size
+        max_frames = max(max_frames, 512)  # At least 512 frames
+        
+        self.STFT_Process = STFT_Process(model_type='istft_C',
+                                         n_fft=self.nfft, 
+                                         win_length=win_length, 
+                                         hop_len=self.hop_length, 
+                                         max_frames=max_frames,
+                                         window_type='hann'
+                                         ).eval()
+
+    def _precompute_istft_basis(self):
+        """Precompute ISTFT basis matrices for CoreML compatibility"""
+        n_fft = self.nfft
+        hop_length = self.hop_length
+        win_length = n_fft // (1 + 3)  # This matches the calculation in _ispec
+        win_length = 2
+        
+        # Get device - use CPU if parameters not initialized yet
+        try:
+            device = next(self.parameters()).device
+        except StopIteration:
+            device = torch.device('cpu')
+        
+        # Create window
+        window = torch.hann_window(win_length, device=device).float()
+        if win_length < n_fft:
+            pad_left = (n_fft - win_length) // 2
+            pad_right = n_fft - win_length - pad_left
+            window = F.pad(window, (pad_left, pad_right), mode='constant', value=0)
+        
+        # Pre-compute fourier basis
+        fourier_basis = torch.fft.fft(torch.eye(n_fft, dtype=torch.float32, device=device))
+        fourier_basis = torch.vstack([
+            torch.real(fourier_basis[:n_fft//2 + 1, :]),
+            torch.imag(fourier_basis[:n_fft//2 + 1, :])
+        ]).float()
+        
+        # Create inverse basis
+        inverse_basis = window * torch.linalg.pinv((fourier_basis * n_fft) / hop_length).T.unsqueeze(1)
+        
+        # Calculate window sum for overlap-add
+        # Use the same max_frames calculation as in __init__
+        audio_length_samples = int(self.segment * self.samplerate) // 2
+        max_frames = (audio_length_samples // self.hop_length) + 1
+        max_frames = max(int(max_frames * 1.2), 512)  # Same buffer and minimum as __init__
+        n = n_fft + hop_length * (max_frames - 1)
+        window_sum = torch.zeros(n, dtype=torch.float32, device=device)
+        
+        # Get original window and normalize it
+        original_window = torch.hann_window(win_length, device=device).float()
+        window_normalized = original_window / original_window.abs().max()
+        
+        # Pad the window to n_fft for overlap-add calculation
+        if win_length < n_fft:
+            pad_left = (n_fft - win_length) // 2
+            pad_right = n_fft - win_length - pad_left
+            win_sq = F.pad(window_normalized ** 2, (pad_left, pad_right), mode='constant', value=0)
+        else:
+            win_sq = window_normalized ** 2
+        
+        # Calculate overlap-add weights
+        for i in range(max_frames):
+            sample = i * hop_length
+            window_sum[sample: min(n, sample + n_fft)] += win_sq[: max(0, min(n_fft, n - sample))]
+        
+        # Calculate window sum inverse
+        window_sum_inv = n_fft / (window_sum * hop_length + 1e-7)
+        
+        # Register as buffers (these will be saved with the model)
+        self.register_buffer("istft_inverse_basis", inverse_basis)
+        self.register_buffer("istft_window_sum_inv", window_sum_inv)
+
     def _spec(self, x):
         hl = self.hop_length
         nfft = self.nfft
@@ -466,13 +552,37 @@ class HTDemucs(nn.Module):
         return z
 
     def _ispec(self, z, length=None, scale=0):
+        print(scale, "SCALE")
         hl = self.hop_length // (4**scale)
         z = F.pad(z, (0, 0, 0, 1))
         z = F.pad(z, (2, 2))
         pad = hl // 2 * 3
         le = hl * int(math.ceil(length / hl)) + 2 * pad
-        # ispectro function handles precision internally
-        x = ispectro(z, hl, length=le)
+
+        hop_length = hl
+        length_stft = le
+
+        *other, freqs, frames = z.shape
+        n_fft = 2 * freqs - 2
+        z = z.view(-1, freqs, frames)
+        
+        # Convert complex tensor to real tensor with real/imag parts concatenated
+        z_real = z.real
+        z_imag = z.imag
+        z_complex_as_real = torch.cat([z_real, z_imag], dim=1)
+
+        # Use the STFT_Process with the calculated parameters
+        # The STFT_Process will use precomputed buffers when parameters match,
+        # or compute on-the-fly when they don't
+        x = self.STFT_Process(z_complex_as_real, 
+                             length=length_stft, 
+                             hop_length=hop_length, 
+                             n_fft=n_fft)
+
+        assert length_stft == x.shape[-1]
+        x = x.view(*other, length_stft)
+
+        #x = ispectro(z, hl, length=le)
         x = x[..., pad: pad + length]
         return x
 
@@ -493,12 +603,12 @@ class HTDemucs(nn.Module):
         niters = self.wiener_iters
         if self.cac:
             B, S, C, Fr, T = m.shape # B, S, C, Fr, T
-            print(m.shape, "M")
+            #  print(m.shape, "M")
             out = m.view(B, S, -1, 2, Fr*T) ## becomes B, S, C/2, 2, Fr, T
-            print(out.shape, "OUT")
+            # print(out.shape, "OUT")
 
             out = out.permute(0, 1, 2, 4, 3) ## becomes B, S, C/2, Fr*T, 2
-            print(out.shape, "OUT PERMUTED")
+            # print(out.shape, "OUT PERMUTED")
             out_real = out[..., 0] ## B, S, C/2, Fr*T
             out_imag = out[..., 1] ## B, S, C/2, Fr*T
 
@@ -600,53 +710,31 @@ class HTDemucs(nn.Module):
                     length_pre_pad = mix.shape[-1]
                     mix = F.pad(mix, (0, training_length - length_pre_pad))
         z = self._spec(mix)
-        if torch.is_complex(z):
-            print("z is complex after _spec")
         mag = self._magnitude(z)
         x = mag
         # Ensure tensor maintains the model's precision after STFT
-        if torch.is_complex(x):
-            print("x is complex before first to()")
         x = x.to(model_dtype)
-        if torch.is_complex(x):
-            print("x is complex after first to()")
 
         if self.num_subbands > 1:
             x = self.cac2cws(x)
-            if torch.is_complex(x):
-                print("x is complex after cac2cws")
 
         B, C, Fq, T = x.shape
 
         # unlike previous Demucs, we always normalize because it is easier.
         # Convert to fp16 before computing statistics
-        print(x.dtype, "x")
-        if torch.is_complex(x):
-            print("x is complex before float32 conversion")
         x = x.to(torch.float32)
-        if torch.is_complex(x):
-            print("x is complex after float32 conversion")
         mean = x.mean(dim=(1, 2, 3), keepdim=True)
         # std operation produces fp32, so explicitly convert to fp16
         std = x.std(dim=(1, 2, 3), keepdim=True).to(torch.float16)
         # Ensure epsilon is in fp16
         epsilon = torch.tensor(1e-5, dtype=torch.float16, device=x.device)
-        print(epsilon.dtype, "epsilon")
         x = (x - mean) / (epsilon + std)
         # Convert back to model dtype
-        if torch.is_complex(x):
-            print("x is complex before model_dtype conversion")
         x = x.to(model_dtype)
-        if torch.is_complex(x):
-            print("x is complex after model_dtype conversion")
 
         # Prepare the time branch input.
         xt = mix
-        if torch.is_complex(xt):
-            print("xt is complex before float32 conversion")
         xt = xt.to(torch.float32)
-        if torch.is_complex(xt):
-            print("xt is complex after float32 conversion")
         meant = xt.mean(dim=(1, 2), keepdim=True)
         # std operation produces fp32, so explicitly convert to fp16
         stdt = xt.std(dim=(1, 2), keepdim=True).to(torch.float16)
@@ -654,11 +742,7 @@ class HTDemucs(nn.Module):
         epsilon = torch.tensor(1e-5, dtype=torch.float16, device=xt.device)
         xt = (xt - meant) / (epsilon + stdt)
         # Convert back to model dtype
-        if torch.is_complex(xt):
-            print("xt is complex before model_dtype conversion")
         xt = xt.to(model_dtype)
-        if torch.is_complex(xt):
-            print("xt is complex after model_dtype conversion")
 
         # okay, this is a giant mess I know...
         saved = []  # skip connections, freq.
@@ -672,11 +756,7 @@ class HTDemucs(nn.Module):
                 # we have not yet merged branches.
                 lengths_t.append(xt.shape[-1])
                 tenc = self.tencoder[idx]
-                if torch.is_complex(xt):
-                    print(f"xt is complex before encoder {idx}")
                 xt = tenc(xt).to(model_dtype)
-                if torch.is_complex(xt):
-                    print(f"xt is complex after encoder {idx}")
                 if not tenc.empty:
                     # save for skip connection
                     saved_t.append(xt)
@@ -684,21 +764,13 @@ class HTDemucs(nn.Module):
                     # tenc contains just the first conv., so that now time and freq.
                     # branches have the same shape and can be merged.
                     inject = xt
-            if torch.is_complex(x):
-                print(f"x is complex before encoder {idx}")
             x = encode(x, inject).to(model_dtype)
-            if torch.is_complex(x):
-                print(f"x is complex after encoder {idx}")
             if idx == 0 and self.freq_emb is not None:
                 # add frequency embedding to allow for non equivariant convolutions
                 # over the frequency axis.
                 frs = torch.arange(x.shape[-2], device=x.device)
                 emb = self.freq_emb(frs).t()[None, :, :, None].expand_as(x)
-                if torch.is_complex(emb):
-                    print("emb is complex before model_dtype conversion")
                 emb = emb.to(model_dtype)
-                if torch.is_complex(emb):
-                    print("emb is complex after model_dtype conversion")
                 emb_scaled = torch.tensor(self.freq_emb_scale, dtype=model_dtype, device=x.device) * emb
                 x = x + emb_scaled
 
@@ -707,57 +779,25 @@ class HTDemucs(nn.Module):
             if self.bottom_channels:
                 b, c, f, t = x.shape
                 x = rearrange(x, "b c f t-> b c (f t)")
-                if torch.is_complex(x):
-                    print("x is complex before channel_upsampler")
                 x = self.channel_upsampler(x).to(model_dtype)
-                if torch.is_complex(x):
-                    print("x is complex after channel_upsampler")
                 x = rearrange(x, "b c (f t)-> b c f t", f=f)
-                if torch.is_complex(xt):
-                    print("xt is complex before channel_upsampler_t")
                 xt = self.channel_upsampler_t(xt).to(model_dtype)
-                if torch.is_complex(xt):
-                    print("xt is complex after channel_upsampler_t")
 
             # Ensure inputs to transformer are in correct precision
-            if torch.is_complex(x):
-                print("x is complex before transformer")
             x = x.to(model_dtype)
-            if torch.is_complex(x):
-                print("x is complex after transformer input conversion")
-            if torch.is_complex(xt):
-                print("xt is complex before transformer")
             xt = xt.to(model_dtype)
-            if torch.is_complex(xt):
-                print("xt is complex after transformer input conversion")
             
             x, xt = self.crosstransformer(x, xt)
             
             # Ensure transformer outputs are in correct precision
-            if torch.is_complex(x):
-                print("x is complex after transformer")
             x = x.to(model_dtype)
-            if torch.is_complex(x):
-                print("x is complex after transformer output conversion")
-            if torch.is_complex(xt):
-                print("xt is complex after transformer")
             xt = xt.to(model_dtype)
-            if torch.is_complex(xt):
-                print("xt is complex after transformer output conversion")
 
             if self.bottom_channels:
                 x = rearrange(x, "b c f t-> b c (f t)")
-                if torch.is_complex(x):
-                    print("x is complex before channel_downsampler")
                 x = self.channel_downsampler(x).to(model_dtype)
-                if torch.is_complex(x):
-                    print("x is complex after channel_downsampler")
                 x = rearrange(x, "b c (f t)-> b c f t", f=f)
-                if torch.is_complex(xt):
-                    print("xt is complex before channel_downsampler_t")
                 xt = self.channel_downsampler_t(xt).to(model_dtype)
-                if torch.is_complex(xt):
-                    print("xt is complex after channel_downsampler_t")
 
         for idx, decode in enumerate(self.decoder):
             skip = saved.pop(-1)
@@ -836,23 +876,11 @@ class HTDemucs(nn.Module):
         else:
             xt = xt.view(B, S, -1, length)
         xt = xt * stdt[:, None] + meant[:, None]
-        if torch.is_complex(xt):
-            print("xt is complex before final model_dtype conversion")
-        xt = xt.to(model_dtype)
-        if torch.is_complex(xt):
-            print("xt is complex after final model_dtype conversion")
+        
         # x = xt + x
         # Ensure final output maintains the model's precision
-        if torch.is_complex(x):
-            print("x is complex before final output conversion")
         #x = x.to(model_dtype)
-        if torch.is_complex(x):
-            print("x is complex after final output conversion")
-        if torch.is_complex(xt):
-            print("xt is complex before final output conversion")
-        xt = xt.to(model_dtype)
-        if torch.is_complex(xt):
-            print("xt is complex after final output conversion")
+        print(length_pre_pad)
         if length_pre_pad:
             x = x[..., :length_pre_pad]
             xt = xt[..., :length_pre_pad]

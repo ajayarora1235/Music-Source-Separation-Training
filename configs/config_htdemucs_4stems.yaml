@@ -1,5 +1,5 @@
 audio:
-  chunk_size: 242550 # samplerate * segment * 2
+  chunk_size: 242550 # samplerate * segment / 2
   min_mean_abs: 0.001
   hop_length: 1024
 
