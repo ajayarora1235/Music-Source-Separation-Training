@@ -185,44 +185,45 @@ def demix_coreml(
                 if len(batch_data) >= batch_size or i >= mix.shape[1]:
                     arr = torch.stack(batch_data, dim=0)
                     print(arr.shape, arr.dtype)
-                    x_real, x_imag, xt = model(arr)
+                    x = model(arr)
+                    # #x_real, x_imag, xt = model(arr)
 
-                    z = torch.complex(x_real, x_imag)
-                    scale = 0
-                    length = arr.shape[-1]
-                    hop_length = model.hop_length
-                    hl = hop_length // (4**scale)
-                    z = F.pad(z, (0, 0, 0, 1))
-                    z = F.pad(z, (2, 2))
-                    pad = hl // 2 * 3
-                    le = hl * int(math.ceil(length / hl)) + 2 * pad
-
-                    hop_length = hl
-                    length_stft = le
-
-                    *other, freqs, frames = z.shape
-                    n_fft = 2 * freqs - 2
-                    z = z.view(-1, freqs, frames)
-                    
-                    # Convert complex tensor to real tensor with real/imag parts concatenated
-                    z_real = z.real
-                    z_imag = z.imag
-                    z_complex_as_real = torch.cat([z_real, z_imag], dim=1)
-
-
-
-                    # x = torch.complex(x_real, x_imag)
+                    # z = torch.complex(x_real, x_imag)
+                    # scale = 0
                     # length = arr.shape[-1]
-                    print("REACHED STFT PROCESS")
-                    x_istft = stft_calc(z_complex_as_real.cpu(), length=length_stft, hop_length=model.hop_length, n_fft=model.nfft)
-                    #x_istft = torch.istft(z.cpu(), n_fft=model.nfft, hop_length=model.hop_length, length=length_stft)
-                    print(x_istft.shape, "X_ISTFT")
-                    print(xt.shape, "XT")
-                    x_istft = x_istft.view(*other, length_stft)
-                    x_istft = x_istft[..., pad: pad + length]
-                    x_istft = x_istft.to(device)
-                    x = xt + x_istft
-                    print(x.shape, "X")
+                    # hop_length = model.hop_length
+                    # hl = hop_length // (4**scale)
+                    # z = F.pad(z, (0, 0, 0, 1))
+                    # z = F.pad(z, (2, 2))
+                    # pad = hl // 2 * 3
+                    # le = hl * int(math.ceil(length / hl)) + 2 * pad
+
+                    # hop_length = hl
+                    # length_stft = le
+
+                    # *other, freqs, frames = z.shape
+                    # n_fft = 2 * freqs - 2
+                    # z = z.view(-1, freqs, frames)
+                    
+                    # # Convert complex tensor to real tensor with real/imag parts concatenated
+                    # z_real = z.real
+                    # z_imag = z.imag
+                    # z_complex_as_real = torch.cat([z_real, z_imag], dim=1)
+
+
+
+                    # # x = torch.complex(x_real, x_imag)
+                    # # length = arr.shape[-1]
+                    # print("REACHED STFT PROCESS")
+                    # x_istft = stft_calc(z_complex_as_real.cpu(), length=length_stft, hop_length=model.hop_length, n_fft=model.nfft)
+                    # #x_istft = torch.istft(z.cpu(), n_fft=model.nfft, hop_length=model.hop_length, length=length_stft)
+                    # print(x_istft.shape, "X_ISTFT")
+                    # print(xt.shape, "XT")
+                    # x_istft = x_istft.view(*other, length_stft)
+                    # x_istft = x_istft[..., pad: pad + length]
+                    # x_istft = x_istft.to(device)
+                    # x = xt + x_istft
+                    # print(x.shape, "X")
                     # Ensure final output maintains the model's precision
 
                     if mode == "generic":

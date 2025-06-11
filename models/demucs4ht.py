@@ -574,7 +574,7 @@ class HTDemucs(nn.Module):
         # Use the STFT_Process with the calculated parameters
         # The STFT_Process will use precomputed buffers when parameters match,
         # or compute on-the-fly when they don't
-        x = self.STFT_Process(z_complex_as_real, 
+        x = self.STFT_Process(z_complex_as_real.cpu(), 
                              length=length_stft, 
                              hop_length=hop_length, 
                              n_fft=n_fft)
@@ -862,11 +862,11 @@ class HTDemucs(nn.Module):
         zout = self._mask(z, x)
         if self.use_train_segment:
             if self.training:
-                x = zout  # Return spectrogram directly
+                x = self._ispec(zout, length)
             else:
-                x = zout  # Return spectrogram directly
+                x = self._ispec(zout, training_length)
         else:
-            x = zout  # Return spectrogram directly
+            x = self._ispec(zout, length)
 
         if self.use_train_segment:
             if self.training:
@@ -876,6 +876,11 @@ class HTDemucs(nn.Module):
         else:
             xt = xt.view(B, S, -1, length)
         xt = xt * stdt[:, None] + meant[:, None]
+
+        x = xt + x.to(xt.device)
+        if length_pre_pad:
+            x = x[..., :length_pre_pad]
+        return x
         
         # x = xt + x
         # Ensure final output maintains the model's precision
