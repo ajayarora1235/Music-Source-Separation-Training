@@ -492,9 +492,20 @@ class HTDemucs(nn.Module):
         # If `cac` is True, `m` is actually a full spectrogram and `z` is ignored.
         niters = self.wiener_iters
         if self.cac:
-            B, S, C, Fr, T = m.shape
-            out = m.view(B, S, -1, 2, Fr, T).permute(0, 1, 2, 4, 5, 3)
-            out = torch.view_as_complex(out.contiguous())
+            B, S, C, Fr, T = m.shape # B, S, C, Fr, T
+            print(m.shape, "M")
+            out = m.view(B, S, -1, 2, Fr*T) ## becomes B, S, C/2, 2, Fr, T
+            print(out.shape, "OUT")
+
+            out = out.permute(0, 1, 2, 4, 3) ## becomes B, S, C/2, Fr*T, 2
+            print(out.shape, "OUT PERMUTED")
+            out_real = out[..., 0] ## B, S, C/2, Fr*T
+            out_imag = out[..., 1] ## B, S, C/2, Fr*T
+
+            out_real = out_real.view(B, S, -1, Fr, T) ## B, S, C/2, Fr, T
+            out_imag = out_imag.view(B, S, -1, Fr, T) ## B, S, C/2, Fr, T
+
+            out = torch.complex(out_real, out_imag).contiguous() ## B, S, C/2, Fr, T
             return out
         if self.training:
             niters = self.end_iters
@@ -578,52 +589,64 @@ class HTDemucs(nn.Module):
         length = mix.shape[-1]
         # Detect the model's parameter precision instead of input precision
         model_dtype = next(self.parameters()).dtype
-        model_dtype = torch.float16
+        #model_dtype = torch.float16
         length_pre_pad = None
         if self.use_train_segment:
             if self.training:
                 self.segment = Fraction(mix.shape[-1], self.samplerate)
             else:
                 training_length = int(self.segment * self.samplerate)
-                # print('Training length: {} Segment: {} Sample rate: {}'.format(training_length, self.segment, self.samplerate))
                 if mix.shape[-1] < training_length:
                     length_pre_pad = mix.shape[-1]
                     mix = F.pad(mix, (0, training_length - length_pre_pad))
-                # print("Mix: {}".format(mix.shape))
-        # print("Length: {}".format(length))
         z = self._spec(mix)
-        print("Z: {} Type: {}".format(z.shape, z.dtype))
+        if torch.is_complex(z):
+            print("z is complex after _spec")
         mag = self._magnitude(z)
         x = mag
         # Ensure tensor maintains the model's precision after STFT
+        if torch.is_complex(x):
+            print("x is complex before first to()")
         x = x.to(model_dtype)
-        # print("MAG: {} Type: {}".format(x.shape, x.dtype))
+        if torch.is_complex(x):
+            print("x is complex after first to()")
 
         if self.num_subbands > 1:
             x = self.cac2cws(x)
-        # print("After SUBBANDS: {} Type: {}".format(x.shape, x.dtype))
+            if torch.is_complex(x):
+                print("x is complex after cac2cws")
 
         B, C, Fq, T = x.shape
 
         # unlike previous Demucs, we always normalize because it is easier.
         # Convert to fp16 before computing statistics
         print(x.dtype, "x")
+        if torch.is_complex(x):
+            print("x is complex before float32 conversion")
         x = x.to(torch.float32)
+        if torch.is_complex(x):
+            print("x is complex after float32 conversion")
         mean = x.mean(dim=(1, 2, 3), keepdim=True)
         # std operation produces fp32, so explicitly convert to fp16
-
         std = x.std(dim=(1, 2, 3), keepdim=True).to(torch.float16)
         # Ensure epsilon is in fp16
         epsilon = torch.tensor(1e-5, dtype=torch.float16, device=x.device)
         print(epsilon.dtype, "epsilon")
         x = (x - mean) / (epsilon + std)
         # Convert back to model dtype
+        if torch.is_complex(x):
+            print("x is complex before model_dtype conversion")
         x = x.to(model_dtype)
-        # x will be the freq. branch input.
+        if torch.is_complex(x):
+            print("x is complex after model_dtype conversion")
 
         # Prepare the time branch input.
         xt = mix
+        if torch.is_complex(xt):
+            print("xt is complex before float32 conversion")
         xt = xt.to(torch.float32)
+        if torch.is_complex(xt):
+            print("xt is complex after float32 conversion")
         meant = xt.mean(dim=(1, 2), keepdim=True)
         # std operation produces fp32, so explicitly convert to fp16
         stdt = xt.std(dim=(1, 2), keepdim=True).to(torch.float16)
@@ -631,10 +654,11 @@ class HTDemucs(nn.Module):
         epsilon = torch.tensor(1e-5, dtype=torch.float16, device=xt.device)
         xt = (xt - meant) / (epsilon + stdt)
         # Convert back to model dtype
+        if torch.is_complex(xt):
+            print("xt is complex before model_dtype conversion")
         xt = xt.to(model_dtype)
-        # print("XT: {} Type: {}".format(xt.shape, xt.dtype))
-
-        # print("XT: {}".format(xt.shape))
+        if torch.is_complex(xt):
+            print("xt is complex after model_dtype conversion")
 
         # okay, this is a giant mess I know...
         saved = []  # skip connections, freq.
@@ -648,8 +672,11 @@ class HTDemucs(nn.Module):
                 # we have not yet merged branches.
                 lengths_t.append(xt.shape[-1])
                 tenc = self.tencoder[idx]
+                if torch.is_complex(xt):
+                    print(f"xt is complex before encoder {idx}")
                 xt = tenc(xt).to(model_dtype)
-                # print("Encode XT {}: {} Type: {}".format(idx, xt.shape, xt.dtype))
+                if torch.is_complex(xt):
+                    print(f"xt is complex after encoder {idx}")
                 if not tenc.empty:
                     # save for skip connection
                     saved_t.append(xt)
@@ -657,13 +684,21 @@ class HTDemucs(nn.Module):
                     # tenc contains just the first conv., so that now time and freq.
                     # branches have the same shape and can be merged.
                     inject = xt
+            if torch.is_complex(x):
+                print(f"x is complex before encoder {idx}")
             x = encode(x, inject).to(model_dtype)
-            # print("Encode X {}: {} Type: {}".format(idx, x.shape, x.dtype))
+            if torch.is_complex(x):
+                print(f"x is complex after encoder {idx}")
             if idx == 0 and self.freq_emb is not None:
                 # add frequency embedding to allow for non equivariant convolutions
                 # over the frequency axis.
                 frs = torch.arange(x.shape[-2], device=x.device)
-                emb = self.freq_emb(frs).t()[None, :, :, None].expand_as(x).to(model_dtype)
+                emb = self.freq_emb(frs).t()[None, :, :, None].expand_as(x)
+                if torch.is_complex(emb):
+                    print("emb is complex before model_dtype conversion")
+                emb = emb.to(model_dtype)
+                if torch.is_complex(emb):
+                    print("emb is complex after model_dtype conversion")
                 emb_scaled = torch.tensor(self.freq_emb_scale, dtype=model_dtype, device=x.device) * emb
                 x = x + emb_scaled
 
@@ -672,41 +707,70 @@ class HTDemucs(nn.Module):
             if self.bottom_channels:
                 b, c, f, t = x.shape
                 x = rearrange(x, "b c f t-> b c (f t)")
+                if torch.is_complex(x):
+                    print("x is complex before channel_upsampler")
                 x = self.channel_upsampler(x).to(model_dtype)
-                # print("After channel_upsampler X: {} Type: {}".format(x.shape, x.dtype))
+                if torch.is_complex(x):
+                    print("x is complex after channel_upsampler")
                 x = rearrange(x, "b c (f t)-> b c f t", f=f)
+                if torch.is_complex(xt):
+                    print("xt is complex before channel_upsampler_t")
                 xt = self.channel_upsampler_t(xt).to(model_dtype)
-                # print("After channel_upsampler_t XT: {} Type: {}".format(xt.shape, xt.dtype))
+                if torch.is_complex(xt):
+                    print("xt is complex after channel_upsampler_t")
 
             # Ensure inputs to transformer are in correct precision
+            if torch.is_complex(x):
+                print("x is complex before transformer")
             x = x.to(model_dtype)
+            if torch.is_complex(x):
+                print("x is complex after transformer input conversion")
+            if torch.is_complex(xt):
+                print("xt is complex before transformer")
             xt = xt.to(model_dtype)
-            # print("Before transformer X: {} Type: {}".format(x.shape, x.dtype))
-            # print("Before transformer XT: {} Type: {}".format(xt.shape, xt.dtype))
+            if torch.is_complex(xt):
+                print("xt is complex after transformer input conversion")
             
             x, xt = self.crosstransformer(x, xt)
-            # print("After transformer X: {} Type: {}".format(x.shape, x.dtype))
-            # print("After transformer XT: {} Type: {}".format(xt.shape, xt.dtype))
             
             # Ensure transformer outputs are in correct precision
+            if torch.is_complex(x):
+                print("x is complex after transformer")
             x = x.to(model_dtype)
+            if torch.is_complex(x):
+                print("x is complex after transformer output conversion")
+            if torch.is_complex(xt):
+                print("xt is complex after transformer")
             xt = xt.to(model_dtype)
+            if torch.is_complex(xt):
+                print("xt is complex after transformer output conversion")
 
             if self.bottom_channels:
                 x = rearrange(x, "b c f t-> b c (f t)")
+                if torch.is_complex(x):
+                    print("x is complex before channel_downsampler")
                 x = self.channel_downsampler(x).to(model_dtype)
-                # print("After channel_downsampler X: {} Type: {}".format(x.shape, x.dtype))
+                if torch.is_complex(x):
+                    print("x is complex after channel_downsampler")
                 x = rearrange(x, "b c (f t)-> b c f t", f=f)
+                if torch.is_complex(xt):
+                    print("xt is complex before channel_downsampler_t")
                 xt = self.channel_downsampler_t(xt).to(model_dtype)
-                # print("After channel_downsampler_t XT: {} Type: {}".format(xt.shape, xt.dtype))
+                if torch.is_complex(xt):
+                    print("xt is complex after channel_downsampler_t")
 
         for idx, decode in enumerate(self.decoder):
             skip = saved.pop(-1)
-            # print("Decoder skip: {} Type: {}".format(skip.shape, skip.dtype))
+            if torch.is_complex(skip):
+                print(f"skip is complex in decoder {idx}")
+            if torch.is_complex(x):
+                print(f"x is complex before decoder {idx}")
             x, pre = decode(x, skip, lengths.pop(-1))
-            # print("After decode x: {} Type: {}".format(x.shape, x.dtype))
+            if torch.is_complex(x):
+                print(f"x is complex after decoder {idx}")
             if pre is not None:
-                # print("After decode pre: {} Type: {}".format(pre.shape, pre.dtype))
+                if torch.is_complex(pre):
+                    print(f"pre is complex in decoder {idx}")
                 pre = pre.to(model_dtype)
             x = x.to(model_dtype)
             # `pre` contains the output just before final transposed convolution,
@@ -719,11 +783,18 @@ class HTDemucs(nn.Module):
                 if tdec.empty:
                     assert pre.shape[2] == 1, pre.shape
                     pre = pre[:, :, 0]
+                    if torch.is_complex(xt):
+                        print(f"xt is complex before tdecoder {idx}")
                     xt, _ = tdec(pre, None, length_t)
+                    if torch.is_complex(xt):
+                        print(f"xt is complex after tdecoder {idx}")
                 else:
                     skip = saved_t.pop(-1)
+                    if torch.is_complex(xt):
+                        print(f"xt is complex before tdecoder {idx}")
                     xt, _ = tdec(xt, skip, length_t)
-                # print('Decode {} XT: {}'.format(idx, xt.shape))
+                    if torch.is_complex(xt):
+                        print(f"xt is complex after tdecoder {idx}")
 
         # Let's make sure we used all stored skip connections.
         assert len(saved) == 0
@@ -734,14 +805,19 @@ class HTDemucs(nn.Module):
 
         if self.num_subbands > 1:
             x = x.view(B, -1, Fq, T)
-            # print("X view 1: {}".format(x.shape))
+            if torch.is_complex(x):
+                print("x is complex after view 1")
             x = self.cws2cac(x)
-            # print("X view 2: {}".format(x.shape))
+            if torch.is_complex(x):
+                print("x is complex after cws2cac")
 
         x = x.view(B, S, -1, Fq * self.num_subbands, T)
         x = x * std[:, None] + mean[:, None]
+        if torch.is_complex(x):
+            print("x is complex before final model_dtype conversion")
         x = x.to(model_dtype)
-        # print("X returned: {}".format(x.shape))
+        if torch.is_complex(x):
+            print("x is complex after final model_dtype conversion")
 
         zout = self._mask(z, x)
         if self.use_train_segment:
@@ -760,16 +836,38 @@ class HTDemucs(nn.Module):
         else:
             xt = xt.view(B, S, -1, length)
         xt = xt * stdt[:, None] + meant[:, None]
+        if torch.is_complex(xt):
+            print("xt is complex before final model_dtype conversion")
         xt = xt.to(model_dtype)
+        if torch.is_complex(xt):
+            print("xt is complex after final model_dtype conversion")
         # x = xt + x
         # Ensure final output maintains the model's precision
-        x = x.to(model_dtype)
+        if torch.is_complex(x):
+            print("x is complex before final output conversion")
+        #x = x.to(model_dtype)
+        if torch.is_complex(x):
+            print("x is complex after final output conversion")
+        if torch.is_complex(xt):
+            print("xt is complex before final output conversion")
         xt = xt.to(model_dtype)
+        if torch.is_complex(xt):
+            print("xt is complex after final output conversion")
         if length_pre_pad:
             x = x[..., :length_pre_pad]
             xt = xt[..., :length_pre_pad]
             
-        return x, xt  # Return both spectrogram and time branch
+        # Separate complex tensor into real and imaginary parts
+        if torch.is_complex(x):
+            print(x.shape, x.dtype, "X")
+            x_real = x.real
+            x_imag = x.imag
+            # Convert both parts to model_dtype
+            x_real = x_real.to(model_dtype)
+            x_imag = x_imag.to(model_dtype)
+            return x_real, x_imag, xt
+        else:
+            return x, xt  # Return both spectrogram and time branch
 
 
 def get_model(args):

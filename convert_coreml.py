@@ -51,6 +51,8 @@ def load_model_and_config(model_type: str, config_path: str, checkpoint_path: st
     else:
         state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
     model.load_state_dict(state_dict)
+
+
     
     if use_stft:
         # Filter out STFT/ISTFT related weights
@@ -77,7 +79,21 @@ def load_model_and_config(model_type: str, config_path: str, checkpoint_path: st
     
     model.load_state_dict(filtered_state_dict)
     model.eval()
-    return model.half() if half else model, config
+    model = model.half() if half else model
+
+    for name, module in model.named_modules():
+        if isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
+            if hasattr(module, 'weight') and hasattr(module, 'bias'):
+                if module.bias is not None:
+                    if module.weight.dtype != module.bias.dtype:
+                        print(f"{name}:")
+                        print(f"  weight dtype: {module.weight.dtype}")
+                        print(f"  bias dtype: {module.bias.dtype}")
+                        print(f"  ❌ MISMATCH FOUND!")
+
+
+
+    return model, config
 
 def prepare_audio(audio_path: str, config: Any, half: bool = False) -> torch.Tensor:
     """Load and prepare audio for model input."""
@@ -184,6 +200,7 @@ def convert_to_coreml(model: torch.nn.Module, example_input: torch.Tensor,
         exported_program,
         inputs=[ct.TensorType(shape=example_input.shape)],
         source='pytorch',
+        compute_precision=ct.precision.FLOAT16,
         minimum_deployment_target=ct.target.iOS17,  # Ensure we use latest CoreML features
     )
     
