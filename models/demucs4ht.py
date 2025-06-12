@@ -439,6 +439,14 @@ class HTDemucs(nn.Module):
         
         # Ensure minimum reasonable size
         max_frames = max(max_frames, 512)  # At least 512 frames
+
+        print("STFT_Process initialization arguments:")
+        print(f"model_type: istft_C")
+        print(f"n_fft: {self.nfft}")
+        print(f"win_length: {win_length}")
+        print(f"hop_len: {self.hop_length}")
+        print(f"max_frames: {max_frames}")
+        print(f"window_type: hann")
         
         self.STFT_Process = STFT_Process(model_type='istft_C',
                                          n_fft=self.nfft, 
@@ -552,13 +560,14 @@ class HTDemucs(nn.Module):
         return z
 
     def _ispec(self, z, length=None, scale=0):
-        print(scale, "SCALE")
+        # print(scale, "SCALE")
         hl = self.hop_length // (4**scale)
         z = F.pad(z, (0, 0, 0, 1))
         z = F.pad(z, (2, 2))
         pad = hl // 2 * 3
         le = hl * int(math.ceil(length / hl)) + 2 * pad
 
+        ### BRING IN ISPECTRO IMPLEMENTATION
         hop_length = hl
         length_stft = le
 
@@ -571,14 +580,16 @@ class HTDemucs(nn.Module):
         z_imag = z.imag
         z_complex_as_real = torch.cat([z_real, z_imag], dim=1)
 
-        # Use the STFT_Process with the calculated parameters
-        # The STFT_Process will use precomputed buffers when parameters match,
-        # or compute on-the-fly when they don't
-        x = self.STFT_Process(z_complex_as_real.cpu(), 
-                             length=length_stft, 
-                             hop_length=hop_length, 
-                             n_fft=n_fft)
-
+        # Run both methods and compare
+        x_stft_process = self.STFT_Process(z_complex_as_real, 
+                                         length=length_stft, 
+                                         hop_length=hop_length,
+                                         n_fft=n_fft)
+        x_stft_process = x_stft_process.squeeze(1)
+        
+        # Apply scaling correction to STFT_Process output
+        x = x_stft_process * 64.0
+        
         assert length_stft == x.shape[-1]
         x = x.view(*other, length_stft)
 

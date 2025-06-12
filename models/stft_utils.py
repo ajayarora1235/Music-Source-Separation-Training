@@ -221,7 +221,7 @@ class STFT_Process(torch.nn.Module):
         n_fft = n_fft if n_fft is not None else self.n_fft
         
         # Check if we can use precomputed buffers
-        print(hop_length, self.hop_len, n_fft, self.n_fft, "HOP_LENGTH, N_FFT")
+        #print(hop_length, self.hop_len, n_fft, self.n_fft, "HOP_LENGTH, N_FFT")
         # Use precomputed buffers for efficiency, but ensure they're on the right device
         device = z.device
 

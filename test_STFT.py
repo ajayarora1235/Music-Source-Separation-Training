@@ -4,18 +4,18 @@ import soundfile as sf
 import librosa
 
 
-test_audio = 'HYBS_TIP_TOE.m4a'                     # Specify the path to your audio file.
+test_audio = '/Users/ajayarora/Documents/youtube_songs/test_for_model_sep/HYBS_TIP_TOE.m4a'                     # Specify the path to your audio file.
 save_reconstructed_audio = 'HYBS_TIP_TOE_STFT.wav'      # Save the reconstructed.
 save_reconstructed_audio_torch = 'HYBS_TIP_TOE_STFT_torch.wav'      # Save the reconstructed.
 
 # Configuration Parameters
-MAX_SIGNAL_LENGTH = 1024        # Maximum number of frames for audio length after STFT. Use larger values for long audio inputs (e.g., 4096).
-INPUT_AUDIO_LENGTH = 5120       # Length of the audio input signal (in samples) for static axis export. Should be a multiple of NFFT.
+MAX_SIGNAL_LENGTH = 512        # Maximum number of frames for audio length after STFT. Use larger values for long audio inputs (e.g., 4096).
+INPUT_AUDIO_LENGTH = 264000       # Length of the audio input signal (in samples) for static axis export. Should be a multiple of NFFT.
 WINDOW_TYPE = 'hann'            # Type of window function used in the STFT.  Support: ['bartlett', 'blackman', 'hamming', 'hann', 'kaiser']
-NFFT = 512                      # Number of FFT components for the STFT process.
-WINDOW_LENGTH = 512             # Match NFFT for best results
-WIN_LENGTH = 512                # Length of windowing - match NFFT
-HOP_LENGTH = 256                # Use 50% overlap (NFFT/2) for standard processing
+NFFT = 4096                     # Number of FFT components for the STFT process.
+WINDOW_LENGTH = 4096             # Match NFFT for best results
+WIN_LENGTH = 4096                # Length of windowing - match NFFT
+HOP_LENGTH = 1024              # Use 50% overlap (NFFT/2) for standard processing
 SAMPLE_RATE = 48000            # Target sample rate.
 STFT_TYPE = "stft_B"            # stft_A: output real_part only;  stft_B: outputs real_part & imag_part
 ISTFT_TYPE = "istft_C"          # istft_A: Inputs = [magnitude, phase];  istft_B: Inputs = [magnitude, real_part, imag_part], The dtype of imag_part is float format.
@@ -97,7 +97,10 @@ for start_idx in range(0, total_length, INPUT_AUDIO_LENGTH):
     print("Magnitude shape:", magnitude.shape)
     
     # Reconstruct chunk through ISTFT
-    reconstructed_chunk = custom_istft(magnitude, real_part, imag_part)
+    istft_input = torch.cat([real_part, imag_part], dim=1)
+    reconstructed_chunk = custom_istft(istft_input, length=chunk_length, hop_length=HOP_LENGTH, n_fft=NFFT)
+
+
     print("Custom ISTFT output shape:", reconstructed_chunk.shape)
     reconstructed_chunks.append(reconstructed_chunk)
 
