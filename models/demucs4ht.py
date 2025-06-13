@@ -580,7 +580,7 @@ class HTDemucs(nn.Module):
         z_imag = z.imag
         z_complex_as_real = torch.cat([z_real, z_imag], dim=1)
 
-        # Run both methods and compare
+        # # Run both methods and compare
         x_stft_process = self.STFT_Process(z_complex_as_real, 
                                          length=length_stft, 
                                          hop_length=hop_length,
@@ -887,6 +887,10 @@ class HTDemucs(nn.Module):
         else:
             xt = xt.view(B, S, -1, length)
         xt = xt * stdt[:, None] + meant[:, None]
+
+        print("num nonzeros in zout", torch.count_nonzero(zout))
+        print("num nonzeros in x", torch.count_nonzero(x))
+        print("num nonzeros in xt", torch.count_nonzero(xt))
 
         x = xt + x.to(xt.device)
         if length_pre_pad:

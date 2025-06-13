@@ -176,33 +176,81 @@ def convert_to_coreml(model: torch.nn.Module, example_input: torch.Tensor,
                      output_path: str) -> None:
     """Convert PyTorch model to CoreML format."""
     model.eval()  # Ensure model is in eval mode
+
+    # with torch.no_grad():
+    #     print(f"Example input shape: {example_input.shape}")
+    #     original_output = model(example_input)
+    #     print(f"Original model output stats:")
+    #     print(f"  Shape: {original_output.shape}")
+    #     print(f"  Min: {original_output.min():.6f}")
+    #     print(f"  Max: {original_output.max():.6f}")
+    #     print(f"  Mean: {original_output.mean():.6f}")
+    #     print(f"  Non-zero elements: {torch.count_nonzero(original_output)}")
     
-    # Use script instead of trace for better handling of control flow
-    example_inputs = (example_input,)
-    exported_program = torch.export.export(
-        model, 
-        example_inputs,
-    )
+    # # Use script instead of trace for better handling of control flow
+    # example_inputs = (torch.randn(1, 2, 242550, dtype=torch.float32),)
+    # # example_inputs = (example_input,)
+    # exported_program = torch.export.export(
+    #     model, 
+    #     example_inputs,
+    # )
 
-    # executorch_program = to_edge_transform_and_lower(
-    #     exported_program,
-    #     partitioner = [CoreMLPartitioner()]
-    # ).to_executorch()
+    # # executorch_program = to_edge_transform_and_lower(
+    # #     exported_program,
+    # #     partitioner = [CoreMLPartitioner()]
+    # # ).to_executorch()
 
-    #exported_program = torch.jit.trace(model, example_input)
+    # #exported_program = torch.jit.trace(model, example_input)
     exported_program = torch.jit.trace(model, example_input, check_trace=False)
 
-    print(type(exported_program))
+    # # Test the traced model
+    # with torch.no_grad():
+    #     traced_output = exported_program(example_input)
+    #     print(f"\nTraced model output stats:")
+    #     print(f"  Shape: {traced_output.shape}")
+    #     print(f"  Min: {traced_output.min():.6f}")
+    #     print(f"  Max: {traced_output.max():.6f}")
+    #     print(f"  Mean: {traced_output.mean():.6f}")
+    #     print(f"  Non-zero elements: {torch.count_nonzero(traced_output)}")
+        
+    #     # Compare outputs
+    #     diff = torch.abs(original_output - traced_output)
+    #     print(f"  Max difference from original: {diff.max():.6f}")
+
+    # print(type(exported_program))
 
     #scripted_model = torch.jit.script(model)
+
+    try:
+        scripted_model = torch.jit.script(model)
+        scripted_output = scripted_model(example_input)
+        print("Script method works - use this instead of trace")
+    except Exception as e:
+        print(f"Script method failed: {e}")
     
     model_from_trace = ct.convert(
         exported_program,
-        inputs=[ct.TensorType(shape=example_input.shape)],
+        inputs=[ct.TensorType(name="audio_input", 
+                         shape=(1, 2, 242550),  # Your exact input shape
+                         dtype=np.float32)],
+        outputs=[ct.TensorType(name="separated_audio", 
+                          dtype=np.float32)],
+        # compute_units=ct.ComputeUnit.CPU_AND_GPU, 
+        compute_precision=ct.precision.FLOAT32,
         source='pytorch',
-        compute_precision=ct.precision.FLOAT16,
         minimum_deployment_target=ct.target.iOS17,  # Ensure we use latest CoreML features
     )
+
+    # Test with the same input you used for tracing
+    test_input = example_input.numpy()  # Convert to numpy
+    coreml_output = model_from_trace.predict({"audio_input": test_input})
+
+    print("CoreML output stats:")
+    output_array = coreml_output["separated_audio"]  # Adjust key name if different
+    print(f"  Shape: {output_array.shape}")
+    print(f"  Min: {output_array.min()}")
+    print(f"  Max: {output_array.max()}")
+    print(f"  Non-zero elements: {np.count_nonzero(output_array)}")
     
     print('Model converted to CoreML')
     model_from_trace.save(output_path)

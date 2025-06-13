@@ -119,7 +119,8 @@ def demix_coreml(
         mode = 'generic'
     # Define processing parameters based on the mode
     if mode == 'demucs':
-        chunk_size = config.training.samplerate * config.training.segment
+        # chunk_size = config.training.samplerate * config.training.segment
+        chunk_size = config.audio.chunk_size
         num_instruments = len(config.training.instruments)
         num_overlap = config.inference.num_overlap
         step = chunk_size // num_overlap
@@ -178,13 +179,35 @@ def demix_coreml(
                 part = nn.functional.pad(part, (0, chunk_size - chunk_len), mode=pad_mode, value=0)
 
                 batch_data.append(part)
+
+                print(part.shape)
+
+                for ch in range(part.shape[0]):
+                    channel_data = part[ch, :].cpu().numpy()
+                    min_val = channel_data.min()
+                    max_val = channel_data.max()
+                    mean_val = channel_data.mean()
+                    zeros = np.sum(channel_data == 0)
+                    total = channel_data.size
+                    print(f"[AudioInput] Channel {ch}: min={min_val:.7f}, max={max_val:.7f}, mean={mean_val:.7e}, zeros={zeros} out of {total}")
+
+
+
+
                 batch_locations.append((i, chunk_len))
                 i += step
 
                 # Process batch if it's full or the end is reached
                 if len(batch_data) >= batch_size or i >= mix.shape[1]:
                     arr = torch.stack(batch_data, dim=0)
+                
                     print(arr.shape, arr.dtype)
+
+                    ## torch.Size([2, 2, 485100])
+
+                    # Print audio chunk statistics for each channel
+
+
                     x = model(arr)
 
                     if mode == "generic":
@@ -294,6 +317,8 @@ def run_folder(model, args, config, device, verbose: bool = False):
         if 'normalize' in config.inference:
             if config.inference['normalize'] is True:
                 mix, norm_params = normalize_audio(mix)
+        else:
+            print(f"No normalization")
 
         # Convert input to tensor and ensure it's in half precision
         # mix = torch.from_numpy(mix).to(device).half()
