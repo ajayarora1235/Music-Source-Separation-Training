@@ -84,10 +84,17 @@ class Attend(nn.Module):
 
         if exists(self.scale):
             default_scale = q.shape[-1] ** -0.5
-            q = q * (self.scale / default_scale)
+            # Ensure scale calculation preserves q's dtype for CoreML compatibility
+            scale_factor = (self.scale / default_scale).to(q.dtype)
+            q = q * scale_factor
 
         # Use scaled_dot_product_attention directly without context manager
         # PyTorch will automatically use the most efficient implementation available
+        # Ensure all tensors have consistent dtype for CoreML compatibility
+        target_dtype = v.dtype
+        q = q.to(target_dtype)
+        k = k.to(target_dtype)
+        v = v.to(target_dtype)
         out = F.scaled_dot_product_attention(
             q, k, v,
             dropout_p = self.dropout if self.training else 0.
@@ -107,6 +114,8 @@ class Attend(nn.Module):
         q_len, k_len, device = q.shape[-2], k.shape[-2], q.device
 
         scale = default(self.scale, q.shape[-1] ** -0.5)
+        # Ensure scale preserves q's dtype for CoreML compatibility
+        scale = torch.tensor(scale, dtype=q.dtype, device=q.device)
 
         if self.flash:
             return self.flash_attn(q, k, v)

@@ -116,6 +116,10 @@ class Attend(nn.Module):
             try:
                 # print("Attempting PyTorch SDPA") # Optional: for debugging
                 # Let PyTorch choose the best backend (Flash V2, Mem Efficient, Math)
+                # Ensure all tensors have consistent dtype for CoreML compatibility
+                target_dtype = q.dtype
+                k = k.to(target_dtype)
+                v = v.to(target_dtype)
                 with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=True):
                     out = F.scaled_dot_product_attention(
                         q, k, v,
@@ -131,6 +135,8 @@ class Attend(nn.Module):
 
         # Calculate scale
         scale = default(self.scale, q.shape[-1] ** -0.5)
+        # Ensure scale preserves q's dtype for CoreML compatibility
+        scale = torch.tensor(scale, dtype=q.dtype, device=q.device)
 
         # similarity
         sim = einsum(f"b h i d, b h j d -> b h i j", q, k) * scale

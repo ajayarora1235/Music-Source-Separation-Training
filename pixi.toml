@@ -10,6 +10,7 @@ version = "0.1.0"
 
 [dependencies]
 python = "==3.10.11"
+pip = ">=25.1.1,<26"
 [pypi-dependencies]
 wxpython = "==4.2.0"
 torch = ">2.0, <2.6.0"

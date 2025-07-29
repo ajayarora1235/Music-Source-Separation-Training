@@ -654,13 +654,15 @@ class MelBandRoformer(Module):
 
         stft_repr = rearrange(stft_repr, 'b n (f s) t -> (b n s) f t', s=self.audio_channels)
 
-        recon_audio = torch.istft(stft_repr, **self.stft_kwargs, window=stft_window, return_complex=False,
-                                  length=istft_length)
+        # recon_audio = torch.istft(stft_repr, **self.stft_kwargs, window=stft_window, return_complex=False,
+        #                           length=istft_length)
 
-        recon_audio = rearrange(recon_audio, '(b n s) t -> b n s t', b=batch, s=self.audio_channels, n=num_stems)
+        # recon_audio = rearrange(recon_audio, '(b n s) t -> b n s t', b=batch, s=self.audio_channels, n=num_stems)
 
-        if num_stems == 1:
-            recon_audio = rearrange(recon_audio, 'b 1 s t -> b s t')
+        # if num_stems == 1:
+        #     recon_audio = rearrange(recon_audio, 'b 1 s t -> b s t')
+
+        return stft_repr
 
         # if a target is passed in, calculate loss for learning
 

@@ -150,7 +150,7 @@ def proc_folder(dict_args):
     print("Instruments: {}".format(config.training.instruments))
 
     # Convert model to half precision before moving to device
-    model = model.half()
+    # model = model.half()
 
     # in case multiple CUDA GPUs are used and --device_ids arg is passed
     if isinstance(args.device_ids, list) and len(args.device_ids) > 1 and not args.force_cpu:

@@ -59,7 +59,7 @@ def demix(
     # mix = mix.to(device).half()
 
     if model_type == 'htdemucs':
-        mode = 'demucs'
+        mode = 'generic'
     else:
         mode = 'generic'
     # Define processing parameters based on the mode
@@ -110,6 +110,9 @@ def demix(
                     pad_mode = "reflect"
                 else:
                     pad_mode = "constant"
+                print(f"pad_mode: {pad_mode}")
+                print(f"chunk_size: {chunk_size}")
+                print(f"chunk_len: {chunk_len}")
                 part = nn.functional.pad(part, (0, chunk_size - chunk_len), mode=pad_mode, value=0)
 
                 batch_data.append(part)
@@ -473,22 +476,31 @@ def load_start_checkpoint(args: argparse.Namespace, model: torch.nn.Module, type
         else:
             model.load_state_dict(torch.load(args.start_check_point))
     else:
-        device='cpu'
-        if args.model_type in ['htdemucs', 'apollo']:
-            state_dict = torch.load(args.start_check_point, map_location=device, weights_only=False)
-            # Fix for htdemucs pretrained models
-            if 'state' in state_dict:
-                state_dict = state_dict['state']
-            # Fix for apollo pretrained models
-            if 'state_dict' in state_dict:
-                state_dict = state_dict['state_dict']
-        else:
-            state_dict = torch.load(args.start_check_point, map_location=device, weights_only=True)
-        model.load_state_dict(state_dict)
+        # Use compatible weight loading for inference to handle shape mismatches
+        # This is especially important for rotary embeddings when chunk_size differs
+        try:
+            device='cpu'
+            if args.model_type in ['htdemucs', 'apollo']:
+                state_dict = torch.load(args.start_check_point, map_location=device, weights_only=False)
+                # Fix for htdemucs pretrained models
+                if 'state' in state_dict:
+                    state_dict = state_dict['state']
+                # Fix for apollo pretrained models
+                if 'state_dict' in state_dict:
+                    state_dict = state_dict['state_dict']
+            else:
+                state_dict = torch.load(args.start_check_point, map_location=device, weights_only=True)
+            model.load_state_dict(state_dict)
+        except RuntimeError as e:
+            if "size mismatch" in str(e):
+                print(f"Shape mismatch detected, using compatible weight loading: {e}")
+                load_not_compatible_weights(model, args.start_check_point, verbose=True)
+            else:
+                raise e
 
-    if args.lora_checkpoint:
-        print(f"Loading LoRA weights from: {args.lora_checkpoint}")
-        load_lora_weights(model, args.lora_checkpoint)
+    # if args.lora_checkpoint:
+    #     print(f"Loading LoRA weights from: {args.lora_checkpoint}")
+    #     load_lora_weights(model, args.lora_checkpoint)
 
 
 def bind_lora_to_model(config: Dict[str, Any], model: nn.Module) -> nn.Module:

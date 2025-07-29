@@ -26,6 +26,7 @@ class STFT:
         x = torch.view_as_real(x)
         x = x.permute([0, 3, 1, 2])
         x = x.reshape([*batch_dims, c, 2, -1, x.shape[-1]]).reshape([*batch_dims, c * 2, -1, x.shape[-1]])
+        print(x.shape)
         return x[..., :self.dim_f, :]
 
     def inverse(self, x):
@@ -37,9 +38,9 @@ class STFT:
         x = torch.cat([x, f_pad], -2)
         x = x.reshape([*batch_dims, c // 2, 2, n, t]).reshape([-1, 2, n, t])
         x = x.permute([0, 2, 3, 1])
-        x = x[..., 0] + x[..., 1] * 1.j
-        x = torch.istft(x, n_fft=self.n_fft, hop_length=self.hop_length, window=window, center=True)
-        x = x.reshape([*batch_dims, 2, -1])
+        # x = x[..., 0] + x[..., 1] * 1.j
+        # x = torch.istft(x, n_fft=self.n_fft, hop_length=self.hop_length, window=window, center=True)
+        # x = x.reshape([*batch_dims, 2, -1])
         return x
 
 
@@ -204,6 +205,10 @@ class TFC_TDF_net(nn.Module):
     def forward(self, x):
 
         x = self.stft(x)
+
+        # x = x[..., :self.stft.dim_f, :]
+
+        print(x.shape, x.dtype, "AFTER STFT")
 
         mix = x = self.cac2cws(x)
 

@@ -383,10 +383,12 @@ class SCNet(nn.Module):
         #     x = x.to(torch.cfloat)
         #     x = torch.istft(x.cpu() if x_is_mps else x, 
         #                             **self.stft_config)
-        x = torch.istft(x, **self.stft_config)
         
-        x = x.reshape(B, len(self.sources), self.audio_channels, -1)
+        ## REMOVED FOR COREML
+        # x = torch.istft(x, **self.stft_config)
+        
+        # x = x.reshape(B, len(self.sources), self.audio_channels, -1)
 
-        x = x[:, :, :, :-padding]
+        # x = x[:, :, :, :-padding]
 
         return x

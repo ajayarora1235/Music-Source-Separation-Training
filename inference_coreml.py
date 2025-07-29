@@ -15,6 +15,7 @@ from tqdm.auto import tqdm
 import torch.nn as nn
 import argparse
 from omegaconf import DictConfig as ConfigDict
+from einops import rearrange
 
 from typing import Dict, List, Tuple, Any, Union
 
@@ -152,9 +153,9 @@ def demix_coreml(
             counter = torch.zeros(req_shape, dtype=torch.float32, device=device)
 
             stft_calc = STFT_Process(model_type='istft_C',
-                                         n_fft=model.nfft, 
-                                         win_length=model.nfft, 
-                                         hop_len=model.hop_length, 
+                                         n_fft=config.model.stft_n_fft, 
+                                         win_length=config.model.stft_win_length, 
+                                         hop_len=config.model.stft_hop_length, 
                                          max_frames=512,
                                          window_type='hann')
             
@@ -209,6 +210,23 @@ def demix_coreml(
 
 
                     x = model(arr)
+
+                    x = torch.view_as_complex(x)
+
+                    stft_window = model.stft_window_fn(device=device)
+                    stft_window = stft_window.half() 
+
+                    print(model.stft_kwargs)
+
+                    recon_audio = torch.istft(x.cpu(), 
+                                    **model.stft_kwargs, 
+                                    window=stft_window.cpu(), 
+                                    return_complex=False, 
+                                    length=arr.shape[-1]).to(device)
+
+                    x = rearrange(
+                        recon_audio, "(b n s) t -> b n s t", s=2, n=6
+                    )
 
                     if mode == "generic":
                         window = windowing_array.clone() # using clone() fixes the clicks at chunk edges when using batch_size=1

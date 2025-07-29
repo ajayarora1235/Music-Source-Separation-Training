@@ -615,26 +615,28 @@ class BSRoformer(Module):
         # istft
         stft_repr = rearrange(stft_repr, 'b n (f s) t -> (b n s) f t', s=self.audio_channels)
 
-        # same as torch.stft() fix for MacOS MPS above
-        try:
-            # Convert to float32 for ISTFT
-            stft_repr = stft_repr.to(torch.cfloat)
-            stft_window = stft_window.to(torch.float32)
-            recon_audio = torch.istft(stft_repr, **self.stft_kwargs, window=stft_window, return_complex=False, length=raw_audio.shape[-1])
-        except:
-            # Ensure all tensors are in the same precision before ISTFT     
-            stft_repr = stft_repr.to(torch.cfloat)
-            stft_window = stft_window.to(torch.float32)
-            recon_audio = torch.istft(stft_repr.cpu() if x_is_mps else stft_repr, 
-                                    **self.stft_kwargs, 
-                                    window=stft_window.cpu() if x_is_mps else stft_window, 
-                                    return_complex=False, 
-                                    length=raw_audio.shape[-1]).to(device)
+        return stft_repr
 
-        recon_audio = rearrange(recon_audio, '(b n s) t -> b n s t', s=self.audio_channels, n=num_stems)
+        # # same as torch.stft() fix for MacOS MPS above
+        # try:
+        #     # Convert to float32 for ISTFT
+        #     stft_repr = stft_repr.to(torch.cfloat)
+        #     stft_window = stft_window.to(torch.float32)
+        #     recon_audio = torch.istft(stft_repr, **self.stft_kwargs, window=stft_window, return_complex=False, length=raw_audio.shape[-1])
+        # except:
+        #     # Ensure all tensors are in the same precision before ISTFT     
+        #     stft_repr = stft_repr.to(torch.cfloat)
+        #     stft_window = stft_window.to(torch.float32)
+        #     recon_audio = torch.istft(stft_repr.cpu() if x_is_mps else stft_repr, 
+        #                             **self.stft_kwargs, 
+        #                             window=stft_window.cpu() if x_is_mps else stft_window, 
+        #                             return_complex=False, 
+        #                             length=raw_audio.shape[-1]).to(device)
 
-        if num_stems == 1:
-            recon_audio = rearrange(recon_audio, 'b 1 s t -> b s t')
+        # recon_audio = rearrange(recon_audio, '(b n s) t -> b n s t', s=self.audio_channels, n=num_stems)
+
+        # if num_stems == 1:
+        #     recon_audio = rearrange(recon_audio, 'b 1 s t -> b s t')
 
         # if a target is passed in, calculate loss for learning
 
