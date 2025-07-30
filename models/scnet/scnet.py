@@ -344,7 +344,7 @@ class SCNet(nn.Module):
                                           x.shape[1], x.shape[2])
         
         # Ensure tensor maintains the model's precision after STFT
-        x = x.to(torch.float16)
+        # x = x.to(torch.float16)
         print(f"x.dtype: {x.dtype}")
 
         B, C, Fr, T = x.shape
@@ -371,7 +371,7 @@ class SCNet(nn.Module):
         n = self.dims[0]
         x = x.view(B, n, -1, Fr, T)
         x = x.reshape(-1, 2, Fr, T).permute(0, 2, 3, 1)
-        x = torch.view_as_complex(x.contiguous())
+        # x = torch.view_as_complex(x.contiguous())
 
         # same as torch.stft() fix for MacOS MPS above
         # try:

@@ -19,8 +19,6 @@ from einops import rearrange
 
 from typing import Dict, List, Tuple, Any, Union
 
-from models.stft_utils import STFT_Process
-
 # Using the embedded version of Python can also correctly import the utils module.
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
@@ -67,6 +65,110 @@ def _getWindowingArray(window_size: int, fade_size: int) -> torch.Tensor:
     window[-fade_size:] = fadeout
     window[:fade_size] = fadein
     return window
+
+def istft_process(x, config, model_type, model, device, arr):
+    num_instruments = len(prefer_target_instrument(config))
+    if model_type == 'bs_roformer' or model_type == 'bs_roformer_apple_coreml':
+        x = torch.view_as_complex(x.contiguous())
+
+        n_fft = config.audio.n_fft
+        hop_length = config.audio.hop_length
+        window = torch.hann_window(window_length=n_fft, periodic=True)
+
+        recon_audio = torch.istft(x.cpu(), 
+                                        **model.stft_kwargs, 
+                                        window=window.cpu(), 
+                                        return_complex=False, 
+                                        length=arr.shape[-1]).to(device)
+        
+        recon_audio = rearrange(
+            recon_audio, "(b n s) t -> b n s t", s=2, n=num_instruments
+        )
+    elif model_type == 'mdx23c':
+        print(x.shape)
+        x = x.contiguous()
+        x = torch.view_as_complex(x.contiguous())
+
+        n_fft = config.audio.n_fft
+        hop_length = config.audio.hop_length
+        window = torch.hann_window(window_length=n_fft, periodic=True)
+
+        recon_audio = torch.istft(x.cpu(), 
+                                        n_fft=n_fft, 
+                                        hop_length=hop_length, 
+                                        window=window.cpu(), 
+                                        return_complex=False, 
+                                        length=arr.shape[-1]).to(device)
+
+        recon_audio = rearrange(
+            recon_audio, "(b n s) t -> b n s t", s=2, n=num_instruments
+        )
+    elif model_type == 'mel_band_roformer':
+        x = torch.view_as_complex(x.contiguous())
+
+        n_fft = config.audio.n_fft
+        hop_length = config.audio.hop_length
+        window = torch.hann_window(window_length=n_fft, periodic=True)
+        
+        recon_audio = torch.istft(x.cpu(), 
+                                        n_fft=n_fft, 
+                                        hop_length=hop_length, 
+                                        window=window.cpu(), 
+                                        return_complex=False, 
+                                        length=arr.shape[-1]).to(device)
+
+        recon_audio = rearrange(
+            recon_audio, "(b n s) t -> b n s t", s=2, n=num_instruments
+        )
+    elif model_type == 'scnet':
+        x = torch.view_as_complex(x.contiguous())
+
+        n_fft = config.model.nfft
+        hop_length = config.model.hop_size
+        window = torch.hann_window(window_length=n_fft, periodic=True)
+
+        recon_audio = torch.istft(x.cpu(), 
+                                  n_fft=n_fft, 
+                                  hop_length=hop_length, 
+                                  window=window.cpu(), 
+                                  return_complex=False, 
+                                  normalized=config.model.normalized,
+                                  length=arr.shape[-1]).to(device)
+
+        recon_audio = rearrange(
+            recon_audio, "(b n s) t -> b n s t", s=2, n=num_instruments
+        )
+    elif model_type == 'htdemucs':
+        z = torch.view_as_complex(x[0].contiguous())
+        length = arr.shape[-1]
+        n_fft = config.htdemucs.nfft
+        hop_length = config.audio.hop_length
+
+
+        pad = hop_length // 2 * 3
+        le = hop_length * int(math.ceil(length / hop_length)) + 2 * pad
+        window = torch.hann_window(window_length=n_fft)
+
+        *other, freqs, frames = z.shape
+        # n_fft = 2 * freqs - 2
+        z = z.view(-1, freqs, frames)
+        
+        win_length = n_fft
+        correct_x = torch.istft(z.cpu(),
+                    n_fft,
+                    hop_length,
+                    window=window.cpu(),
+                    win_length=win_length,
+                    normalized=True,
+                    length=le,
+                    center=True)
+        _, length_real = correct_x.shape 
+        correct_x = correct_x.view(*other, length_real)
+        correct_x = correct_x[..., pad: pad + length].to(device)
+        return correct_x + x[1]
+
+        
+    return recon_audio
 
 def demix_coreml(
         config: ConfigDict,
@@ -128,6 +230,7 @@ def demix_coreml(
     else:
         chunk_size = config.audio.chunk_size
         num_instruments = len(prefer_target_instrument(config))
+        print(num_instruments, "NUM INSTRUMENTS")
         num_overlap = config.inference.num_overlap
 
         fade_size = chunk_size // 10
@@ -152,16 +255,6 @@ def demix_coreml(
             result = torch.zeros(req_shape, dtype=torch.float32, device=device)
             counter = torch.zeros(req_shape, dtype=torch.float32, device=device)
 
-            stft_calc = STFT_Process(model_type='istft_C',
-                                         n_fft=config.model.stft_n_fft, 
-                                         win_length=config.model.stft_win_length, 
-                                         hop_len=config.model.stft_hop_length, 
-                                         max_frames=512,
-                                         window_type='hann')
-            
-            # Move STFT_Process to the same device as the model
-            stft_calc = stft_calc.to(device)
-
             i = 0
             batch_data = []
             batch_locations = []
@@ -181,19 +274,6 @@ def demix_coreml(
 
                 batch_data.append(part)
 
-                print(part.shape)
-
-                for ch in range(part.shape[0]):
-                    channel_data = part[ch, :].cpu().numpy()
-                    min_val = channel_data.min()
-                    max_val = channel_data.max()
-                    mean_val = channel_data.mean()
-                    zeros = np.sum(channel_data == 0)
-                    total = channel_data.size
-                    print(f"[AudioInput] Channel {ch}: min={min_val:.7f}, max={max_val:.7f}, mean={mean_val:.7e}, zeros={zeros} out of {total}")
-
-
-
 
                 batch_locations.append((i, chunk_len))
                 i += step
@@ -204,29 +284,13 @@ def demix_coreml(
                 
                     print(arr.shape, arr.dtype)
 
-                    ## torch.Size([2, 2, 485100])
-
-                    # Print audio chunk statistics for each channel
-
-
                     x = model(arr)
 
-                    x = torch.view_as_complex(x)
+                    
 
-                    stft_window = model.stft_window_fn(device=device)
-                    stft_window = stft_window.half() 
+                    x = istft_process(x, config, model_type, model, device, arr)
 
-                    print(model.stft_kwargs)
-
-                    recon_audio = torch.istft(x.cpu(), 
-                                    **model.stft_kwargs, 
-                                    window=stft_window.cpu(), 
-                                    return_complex=False, 
-                                    length=arr.shape[-1]).to(device)
-
-                    x = rearrange(
-                        recon_audio, "(b n s) t -> b n s t", s=2, n=6
-                    )
+                    
 
                     if mode == "generic":
                         window = windowing_array.clone() # using clone() fixes the clicks at chunk edges when using batch_size=1
@@ -449,4 +513,21 @@ def proc_folder(dict_args):
 
 
 if __name__ == "__main__":
-    proc_folder(None)
+    passed_tests = ['htdemucs', 'mdx23c', 'scnet', 'bs_roformer_apple_coreml']
+    model_types = ['htdemucs', 'mdx23c', 'mel_band_roformer', 'scnet', 'bs_roformer_apple_coreml']
+    configs = ['configs/config_htdemucs_4stems.yaml', 'configs/config_vocals_mdx23c.yaml', 'configs/KimberleyJensen/config_vocals_mel_band_roformer_kj.yaml', 'configs/config_musdb18_scnet_large_starrytong.yaml', 'configs/config_v1_apple_model.yaml']
+    checkpoints = ['checkpoints/demucs.th', 'checkpoints/model_vocals_mdx23c_sdr_10.17.ckpt', 'checkpoints/MelBandRoformer.ckpt', 'checkpoints/SCNet-large_starrytong_fixed.ckpt', 'checkpoints/logic_roformer-fp16.pt']
+    input_folder = 'test_data/'
+    store_dir = 'test_data/results'
+    for model_type, config, checkpoint in zip(model_types, configs, checkpoints):
+        if model_type in passed_tests:
+            print(f"Skipping {model_type} as it has already passed tests.")
+            continue
+        print(f"Processing {model_type} with config {config} and checkpoint {checkpoint}")
+        proc_folder({
+            'model_type': model_type,
+            'config_path': config,
+            'start_check_point': checkpoint,
+            'input_folder': input_folder,
+            'store_dir': store_dir,
+        })

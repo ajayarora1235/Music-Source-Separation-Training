@@ -242,26 +242,11 @@ def get_model_from_config(model_type: str, config_path: str) -> Tuple:
     elif model_type == 'htdemucs':
         from models.demucs4ht import get_model
         model = get_model(config)
-    elif model_type == 'segm_models':
-        from models.segm_models import Segm_Models_Net
-        model = Segm_Models_Net(config)
-    elif model_type == 'torchseg':
-        from models.torchseg_models import Torchseg_Net
-        model = Torchseg_Net(config)
     elif model_type == 'mel_band_roformer':
         from models.bs_roformer import MelBandRoformer
         model = MelBandRoformer(**dict(config.model))
-    elif model_type == 'mel_band_roformer_experimental':
-        from models.bs_roformer.mel_band_roformer_experimental import MelBandRoformer
-        model = MelBandRoformer(**dict(config.model))
     elif model_type == 'bs_roformer':
         from models.bs_roformer import BSRoformer
-        model = BSRoformer(**dict(config.model))
-    elif model_type == 'bs_roformer_experimental':
-        from models.bs_roformer.bs_roformer_experimental import BSRoformer
-        model = BSRoformer(**dict(config.model))
-    elif model_type == 'bs_roformer_apple':
-        from models.bs_roformer.bs_roformer_apple import BSRoformer
         model = BSRoformer(**dict(config.model))
     elif model_type == 'bs_roformer_apple_fp16':
         from models.bs_roformer.bs_roformer_apple_fp16 import BSRoformer
@@ -269,15 +254,6 @@ def get_model_from_config(model_type: str, config_path: str) -> Tuple:
     elif model_type == 'bs_roformer_apple_coreml':
         from models.bs_roformer.bs_roformer_apple_fp16 import BSRoformerCoreML
         model = BSRoformerCoreML(**dict(config.model))
-    elif model_type == 'swin_upernet':
-        from models.upernet_swin_transformers import Swin_UperNet_Model
-        model = Swin_UperNet_Model(config)
-    elif model_type == 'bandit':
-        from models.bandit.core.model import MultiMaskMultiSourceBandSplitRNNSimple
-        model = MultiMaskMultiSourceBandSplitRNNSimple(**config.model)
-    elif model_type == 'bandit_v2':
-        from models.bandit_v2.bandit import Bandit
-        model = Bandit(**config.kwargs)
     elif model_type == 'scnet_unofficial':
         from models.scnet_unofficial import SCNet
         model = SCNet(**config.model)
@@ -290,15 +266,6 @@ def get_model_from_config(model_type: str, config_path: str) -> Tuple:
     elif model_type == 'scnet_masked':
         from models.scnet.scnet_masked import SCNet
         model = SCNet(**config.model)
-    elif model_type == 'apollo':
-        from models.look2hear.models import BaseModel
-        model = BaseModel.apollo(**config.model)
-    elif model_type == 'bs_mamba2':
-        from models.ts_bs_mamba2 import Separator
-        model = Separator(**config.model)
-    elif model_type == 'experimental_mdx23c_stht':
-        from models.mdx23c_tfc_tdf_v3_with_STHT import TFC_TDF_net
-        model = TFC_TDF_net(config)
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 

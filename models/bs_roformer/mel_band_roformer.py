@@ -6,11 +6,6 @@ from torch.nn import Module, ModuleList
 import torch.nn.functional as F
 
 from models.bs_roformer.attend import Attend
-try:
-    from models.bs_roformer.attend_sage import Attend as AttendSage
-except:
-    pass
-from torch.utils.checkpoint import checkpoint
 
 from beartype.typing import Tuple, Optional, List, Callable
 from beartype import beartype
@@ -18,7 +13,6 @@ from beartype import beartype
 from rotary_embedding_torch import RotaryEmbedding
 
 from einops import rearrange, pack, unpack, reduce, repeat
-from einops.layers.torch import Rearrange
 
 from librosa import filters
 
@@ -45,10 +39,6 @@ def pad_at_dim(t, pad, dim=-1, value=0.):
     dims_from_right = (- dim - 1) if dim < 0 else (t.ndim - dim - 1)
     zeros = ((0, 0) * dims_from_right)
     return F.pad(t, (*zeros, *pad), value=value)
-
-
-def l2norm(t):
-    return F.normalize(t, dim=-1, p=2)
 
 
 # norm
@@ -95,8 +85,7 @@ class Attention(Module):
             dim_head=64,
             dropout=0.,
             rotary_embed=None,
-            flash=True,
-            sage_attention=False,
+            flash=True
     ):
         super().__init__()
         self.heads = heads
@@ -105,10 +94,8 @@ class Attention(Module):
 
         self.rotary_embed = rotary_embed
 
-        if sage_attention:
-            self.attend = AttendSage(flash=flash, dropout=dropout)
-        else:
-            self.attend = Attend(flash=flash, dropout=dropout)
+        self.attend = Attend(flash=flash, dropout=dropout)
+
         self.norm = RMSNorm(dim)
         self.to_qkv = nn.Linear(dim, dim_inner * 3, bias=False)
 
@@ -137,68 +124,6 @@ class Attention(Module):
         return self.to_out(out)
 
 
-class LinearAttention(Module):
-    """
-    this flavor of linear attention proposed in https://arxiv.org/abs/2106.09681 by El-Nouby et al.
-    """
-
-    @beartype
-    def __init__(
-            self,
-            *,
-            dim,
-            dim_head=32,
-            heads=8,
-            scale=8,
-            flash=False,
-            dropout=0.,
-            sage_attention=False
-    ):
-        super().__init__()
-        dim_inner = dim_head * heads
-        self.norm = RMSNorm(dim)
-
-        self.to_qkv = nn.Sequential(
-            nn.Linear(dim, dim_inner * 3, bias=False),
-            Rearrange('b n (qkv h d) -> qkv b h d n', qkv=3, h=heads)
-        )
-
-        self.temperature = nn.Parameter(torch.ones(heads, 1, 1))
-
-        if sage_attention:
-            self.attend = AttendSage(
-                scale=scale,
-                dropout=dropout,
-                flash=flash
-            )
-        else:
-            self.attend = Attend(
-                scale=scale,
-                dropout=dropout,
-                flash=flash
-            )
-
-        self.to_out = nn.Sequential(
-            Rearrange('b h d n -> b n (h d)'),
-            nn.Linear(dim_inner, dim, bias=False)
-        )
-
-    def forward(
-            self,
-            x
-    ):
-        x = self.norm(x)
-
-        q, k, v = self.to_qkv(x)
-
-        q, k = map(l2norm, (q, k))
-        q = q * self.temperature.exp()
-
-        out = self.attend(q, k, v)
-
-        return self.to_out(out)
-
-
 class Transformer(Module):
     def __init__(
             self,
@@ -212,36 +137,15 @@ class Transformer(Module):
             ff_mult=4,
             norm_output=True,
             rotary_embed=None,
-            flash_attn=True,
-            linear_attn=False,
-            sage_attention=False,
+            flash_attn=True
     ):
         super().__init__()
         self.layers = ModuleList([])
 
         for _ in range(depth):
-            if linear_attn:
-                attn = LinearAttention(
-                    dim=dim,
-                    dim_head=dim_head,
-                    heads=heads,
-                    dropout=attn_dropout,
-                    flash=flash_attn,
-                    sage_attention=sage_attention
-                )
-            else:
-                attn = Attention(
-                    dim=dim,
-                    dim_head=dim_head,
-                    heads=heads,
-                    dropout=attn_dropout,
-                    rotary_embed=rotary_embed,
-                    flash=flash_attn,
-                    sage_attention=sage_attention
-                )
-
             self.layers.append(ModuleList([
-                attn,
+                Attention(dim=dim, dim_head=dim_head, heads=heads, dropout=attn_dropout, rotary_embed=rotary_embed,
+                          flash=flash_attn),
                 FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout)
             ]))
 
@@ -363,7 +267,6 @@ class MelBandRoformer(Module):
             num_stems=1,
             time_transformer_depth=2,
             freq_transformer_depth=2,
-            linear_transformer_depth=0,
             num_bands=60,
             dim_head=64,
             heads=8,
@@ -385,23 +288,14 @@ class MelBandRoformer(Module):
             multi_stft_normalized=False,
             multi_stft_window_fn: Callable = torch.hann_window,
             match_input_audio_length=False,  # if True, pad output tensor to match length of input tensor
-            mlp_expansion_factor=4,
-            use_torch_checkpoint=False,
-            skip_connection=False,
-            sage_attention=False,
     ):
         super().__init__()
 
         self.stereo = stereo
         self.audio_channels = 2 if stereo else 1
         self.num_stems = num_stems
-        self.use_torch_checkpoint = use_torch_checkpoint
-        self.skip_connection = skip_connection
 
         self.layers = ModuleList([])
-
-        if sage_attention:
-            print("Use Sage Attention")
 
         transformer_kwargs = dict(
             dim=dim,
@@ -409,24 +303,17 @@ class MelBandRoformer(Module):
             dim_head=dim_head,
             attn_dropout=attn_dropout,
             ff_dropout=ff_dropout,
-            flash_attn=flash_attn,
-            sage_attention=sage_attention,
+            flash_attn=flash_attn
         )
 
         time_rotary_embed = RotaryEmbedding(dim=dim_head)
         freq_rotary_embed = RotaryEmbedding(dim=dim_head)
 
         for _ in range(depth):
-            tran_modules = []
-            if linear_transformer_depth > 0:
-                tran_modules.append(Transformer(depth=linear_transformer_depth, linear_attn=True, **transformer_kwargs))
-            tran_modules.append(
-                Transformer(depth=time_transformer_depth, rotary_embed=time_rotary_embed, **transformer_kwargs)
-            )
-            tran_modules.append(
+            self.layers.append(nn.ModuleList([
+                Transformer(depth=time_transformer_depth, rotary_embed=time_rotary_embed, **transformer_kwargs),
                 Transformer(depth=freq_transformer_depth, rotary_embed=freq_rotary_embed, **transformer_kwargs)
-            )
-            self.layers.append(nn.ModuleList(tran_modules))
+            ]))
 
         self.stft_window_fn = partial(default(stft_window_fn, torch.hann_window), stft_win_length)
 
@@ -437,7 +324,7 @@ class MelBandRoformer(Module):
             normalized=stft_normalized
         )
 
-        freqs = torch.stft(torch.randn(1, 4096), **self.stft_kwargs, window=torch.ones(stft_n_fft), return_complex=True).shape[1]
+        freqs = torch.stft(torch.randn(1, 4096), **self.stft_kwargs, return_complex=True).shape[1]
 
         # create mel filter bank
         # with librosa.filters.mel as in section 2 of paper
@@ -492,8 +379,7 @@ class MelBandRoformer(Module):
             mask_estimator = MaskEstimator(
                 dim=dim,
                 dim_inputs=freqs_per_bands_with_complex,
-                depth=mask_estimator_depth,
-                mlp_expansion_factor=mlp_expansion_factor,
+                depth=mask_estimator_depth
             )
 
             self.mask_estimators.append(mask_estimator)
@@ -552,9 +438,8 @@ class MelBandRoformer(Module):
         stft_repr = torch.view_as_real(stft_repr)
 
         stft_repr = unpack_one(stft_repr, batch_audio_channel_packed_shape, '* f t c')
-
-        # merge stereo / mono into the frequency, with frequency leading dimension, for band splitting
-        stft_repr = rearrange(stft_repr,'b s f t c -> b (f s) t c')
+        stft_repr = rearrange(stft_repr,
+                              'b s f t c -> b (f s) t c')  # merge stereo / mono into the frequency, with frequency leading dimension, for band splitting
 
         # index out all frequencies for all frequency ranges across bands ascending in one go
 
@@ -568,83 +453,51 @@ class MelBandRoformer(Module):
 
         x = rearrange(x, 'b f t c -> b t (f c)')
 
-        if self.use_torch_checkpoint:
-            x = checkpoint(self.band_split, x, use_reentrant=False)
-        else:
-            x = self.band_split(x)
+        x = self.band_split(x)
 
         # axial / hierarchical attention
 
-        store = [None] * len(self.layers)
-        for i, transformer_block in enumerate(self.layers):
-
-            if len(transformer_block) == 3:
-                linear_transformer, time_transformer, freq_transformer = transformer_block
-
-                x, ft_ps = pack([x], 'b * d')
-                if self.use_torch_checkpoint:
-                    x = checkpoint(linear_transformer, x, use_reentrant=False)
-                else:
-                    x = linear_transformer(x)
-                x, = unpack(x, ft_ps, 'b * d')
-            else:
-                time_transformer, freq_transformer = transformer_block
-
-            if self.skip_connection:
-                # Sum all previous
-                for j in range(i):
-                    x = x + store[j]
-
+        for time_transformer, freq_transformer in self.layers:
             x = rearrange(x, 'b t f d -> b f t d')
             x, ps = pack([x], '* t d')
 
-            if self.use_torch_checkpoint:
-                x = checkpoint(time_transformer, x, use_reentrant=False)
-            else:
-                x = time_transformer(x)
+            x = time_transformer(x)
 
             x, = unpack(x, ps, '* t d')
             x = rearrange(x, 'b f t d -> b t f d')
             x, ps = pack([x], '* f d')
 
-            if self.use_torch_checkpoint:
-                x = checkpoint(freq_transformer, x, use_reentrant=False)
-            else:
-                x = freq_transformer(x)
+            x = freq_transformer(x)
 
             x, = unpack(x, ps, '* f d')
 
-            if self.skip_connection:
-                store[i] = x
-
         num_stems = len(self.mask_estimators)
-        if self.use_torch_checkpoint:
-            masks = torch.stack([checkpoint(fn, x, use_reentrant=False) for fn in self.mask_estimators], dim=1)
-        else:
-            masks = torch.stack([fn(x) for fn in self.mask_estimators], dim=1)
+
+        masks = torch.stack([fn(x) for fn in self.mask_estimators], dim=1)
         masks = rearrange(masks, 'b n t (f c) -> b n f t c', c=2)
 
         # modulate frequency representation
 
         stft_repr = rearrange(stft_repr, 'b f t c -> b 1 f t c')
 
-        # complex number multiplication
-
-        stft_repr = torch.view_as_complex(stft_repr)
-        masks = torch.view_as_complex(masks)
-
-        masks = masks.type(stft_repr.dtype)
-
         # need to average the estimated mask for the overlapped frequencies
+        # Do this BEFORE converting to complex numbers
 
-        scatter_indices = repeat(self.freq_indices, 'f -> b n f t', b=batch, n=num_stems, t=stft_repr.shape[-1])
+        scatter_indices = repeat(self.freq_indices, 'f -> b n f t c', b=batch, n=num_stems, t=stft_repr.shape[-2], c=2)
 
         stft_repr_expanded_stems = repeat(stft_repr, 'b 1 ... -> b n ...', n=num_stems)
         masks_summed = torch.zeros_like(stft_repr_expanded_stems).scatter_add_(2, scatter_indices, masks)
 
-        denom = repeat(self.num_bands_per_freq, 'f -> (f r) 1', r=channels)
+        denom = repeat(self.num_bands_per_freq, 'f -> (f r) 1 1', r=channels)
 
         masks_averaged = masks_summed / denom.clamp(min=1e-8)
+
+
+        # NOW convert to complex numbers for multiplication
+        stft_repr = torch.view_as_complex(stft_repr)
+        masks_averaged = torch.view_as_complex(masks_averaged)
+
+        masks_averaged = masks_averaged.type(stft_repr.dtype)
 
         # modulate stft repr with estimated mask
 
@@ -654,6 +507,11 @@ class MelBandRoformer(Module):
 
         stft_repr = rearrange(stft_repr, 'b n (f s) t -> (b n s) f t', s=self.audio_channels)
 
+        ## view as real
+        stft_repr = torch.view_as_real(stft_repr)
+
+        return stft_repr
+
         # recon_audio = torch.istft(stft_repr, **self.stft_kwargs, window=stft_window, return_complex=False,
         #                           length=istft_length)
 
@@ -661,8 +519,6 @@ class MelBandRoformer(Module):
 
         # if num_stems == 1:
         #     recon_audio = rearrange(recon_audio, 'b 1 s t -> b s t')
-
-        return stft_repr
 
         # if a target is passed in, calculate loss for learning
 

@@ -452,9 +452,26 @@ class HTDemucs(nn.Module):
         z = F.pad(z, (2, 2))
         pad = hl // 2 * 3
         le = hl * int(math.ceil(length / hl)) + 2 * pad
-        x = ispectro(z, hl, length=le)
-        x = x[..., pad: pad + length]
-        return x
+
+        
+        # *other, freqs, frames = z.shape
+        # n_fft = 2 * freqs - 2
+        # z = z.view(-1, freqs, frames)
+        # win_length = n_fft
+        # x = torch.istft(z,
+        #             n_fft,
+        #             hl,
+        #             window=torch.hann_window(win_length).to(z.real),
+        #             win_length=win_length,
+        #             normalized=True,
+        #             length=le,
+        #             center=True)
+        # _, length_real = x.shape
+        # x = x.view(*other, length_real)
+        # pad = hl // 2 * 3
+        # x = x[..., pad: pad + length]
+        # return x
+        return z
 
     def _magnitude(self, z):
         # return the magnitude of the spectrogram, except when cac is True,
@@ -671,13 +688,13 @@ class HTDemucs(nn.Module):
         # print("X returned: {}".format(x.shape))
 
         zout = self._mask(z, x)
-        # if self.use_train_segment:
-        #     if self.training:
-        #         x = self._ispec(zout, length)
-        #     else:
-        #         x = self._ispec(zout, training_length)
-        # else:
-        #     x = self._ispec(zout, length)
+        if self.use_train_segment:
+            if self.training:
+                x = self._ispec(zout, length)
+            else:
+                x = self._ispec(zout, training_length)
+        else:
+            x = self._ispec(zout, length)
 
         if self.use_train_segment:
             if self.training:
@@ -688,12 +705,15 @@ class HTDemucs(nn.Module):
             xt = xt.view(B, S, -1, length)
         xt = xt * stdt[:, None] + meant[:, None]
 
+        x = torch.stack([x.real, x.imag], dim=-1)
+        print(x.shape)
+
         # x = xt + x
         # if length_pre_pad:
         #     x = x[..., :length_pre_pad]
         # return x
 
-        return zout.real, zout.imag, xt
+        return x, xt
 
 
 def get_model(args):

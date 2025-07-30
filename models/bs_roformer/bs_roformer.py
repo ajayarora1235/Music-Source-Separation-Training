@@ -503,40 +503,43 @@ class BSRoformer(Module):
         # defining whether model is loaded on MPS (MacOS GPU accelerator)
         x_is_mps = True if device.type == "mps" else False
 
-        # if raw_audio.ndim == 2:
-        #     raw_audio = rearrange(raw_audio, 'b t -> b 1 t')
+        print(raw_audio.shape)
 
-        # channels = raw_audio.shape[1]
-        # assert (not self.stereo and channels == 1) or (self.stereo and channels == 2), 'stereo needs to be set to True if passing in audio signal that is stereo (channel dimension of 2). also need to be False if mono (channel dimension of 1)'
+        if raw_audio.ndim == 2:
+            raw_audio = rearrange(raw_audio, 'b t -> 1 b t')
 
-        # # to stft
-        # raw_audio, batch_audio_channel_packed_shape = pack_one(raw_audio, '* t')
+        channels = raw_audio.shape[1]
+        assert (not self.stereo and channels == 1) or (self.stereo and channels == 2), 'stereo needs to be set to True if passing in audio signal that is stereo (channel dimension of 2). also need to be False if mono (channel dimension of 1)'
 
-        # stft_window = self.stft_window_fn(device=device)
+        # to stft
+        raw_audio, batch_audio_channel_packed_shape = pack_one(raw_audio, '* t')
+
+        stft_window = self.stft_window_fn(device=device)
+
+        print(raw_audio.shape)
         
-        # # Convert input to float32 for STFT computation
-        # raw_audio = raw_audio.float()
-        # stft_window = stft_window.float()
+        # Convert input to float32 for STFT computation
+        raw_audio = raw_audio.float()
+        stft_window = stft_window.float()
 
-        # # RuntimeError: FFT operations are only supported on MacOS 14+
-        # # Since it's tedious to define whether we're on correct MacOS version - simple try-catch is used
-        # try:
-        #     stft_repr = torch.stft(raw_audio, **self.stft_kwargs, window=stft_window, return_complex=True)
-        # except:
-        #     stft_repr = torch.stft(raw_audio.cpu() if x_is_mps else raw_audio, **self.stft_kwargs,
-        #                            window=stft_window.cpu() if x_is_mps else stft_window, return_complex=True).to(
-        #         device)
+        # RuntimeError: FFT operations are only supported on MacOS 14+
+        # Since it's tedious to define whether we're on correct MacOS version - simple try-catch is used
+        try:
+            stft_repr = torch.stft(raw_audio, **self.stft_kwargs, window=stft_window, return_complex=True)
+        except:
+            stft_repr = torch.stft(raw_audio.cpu() if x_is_mps else raw_audio, **self.stft_kwargs,
+                                   window=stft_window.cpu() if x_is_mps else stft_window, return_complex=True).to(
+                device)
         
-        # stft_repr = torch.view_as_real(stft_repr)
+        stft_repr = torch.view_as_real(stft_repr)
         # stft_repr = stft_repr.half()  # Ensure STFT output is in half precision
 
-        # stft_repr = unpack_one(stft_repr, batch_audio_channel_packed_shape, '* f t c')
+        stft_repr = unpack(stft_repr, batch_audio_channel_packed_shape, "* f t c")[0]
 
         # merge stereo / mono into the frequency, with frequency leading dimension, for band splitting
-        stft_repr = raw_audio
-        stft_repr = rearrange(stft_repr,'b s f t c -> b (f s) t c')
+        stft_repr = rearrange(stft_repr, "b s f t c -> b (f s) t c")
 
-        x = rearrange(stft_repr, 'b f t c -> b t (f c)')
+        x = rearrange(stft_repr, "b f t c -> b t (f c)")
 
         if self.use_torch_checkpoint:
             x = checkpoint(self.band_split, x, use_reentrant=False)
@@ -612,8 +615,15 @@ class BSRoformer(Module):
 
         stft_repr = stft_repr * mask
 
+        print(stft_repr.shape)
+        print(mask.shape)
+
         # istft
         stft_repr = rearrange(stft_repr, 'b n (f s) t -> (b n s) f t', s=self.audio_channels)
+
+        print(stft_repr.shape)
+
+        stft_repr = torch.view_as_real(stft_repr)
 
         return stft_repr
 
