@@ -5,7 +5,7 @@ from torch import nn, einsum, Tensor
 from torch.nn import Module, ModuleList
 import torch.nn.functional as F
 
-from models.bs_roformer.attend import Attend
+from .attend import Attend
 
 from beartype.typing import Tuple, Optional, List, Callable
 from beartype import beartype
@@ -15,9 +15,6 @@ from rotary_embedding_torch import RotaryEmbedding
 from einops import rearrange, pack, unpack, reduce, repeat
 
 from librosa import filters
-
-
-# helper functions
 
 def exists(val):
     return val is not None
@@ -40,9 +37,6 @@ def pad_at_dim(t, pad, dim=-1, value=0.):
     zeros = ((0, 0) * dims_from_right)
     return F.pad(t, (*zeros, *pad), value=value)
 
-
-# norm
-
 class RMSNorm(Module):
     def __init__(self, dim):
         super().__init__()
@@ -50,10 +44,8 @@ class RMSNorm(Module):
         self.gamma = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
+        x = x.to(self.gamma.device)
         return F.normalize(x, dim=-1) * self.scale * self.gamma
-
-
-# attention
 
 class FeedForward(Module):
     def __init__(
@@ -159,9 +151,6 @@ class Transformer(Module):
 
         return self.norm(x)
 
-
-# bandsplit module
-
 class BandSplit(Module):
     @beartype
     def __init__(
@@ -252,9 +241,6 @@ class MaskEstimator(Module):
 
         return torch.cat(outs, dim=-1)
 
-
-# main class
-
 class MelBandRoformer(Module):
 
     @beartype
@@ -274,10 +260,9 @@ class MelBandRoformer(Module):
             ff_dropout=0.1,
             flash_attn=True,
             dim_freqs_in=1025,
-            sample_rate=44100,  # needed for mel filter bank from librosa
+            sample_rate=44100,
             stft_n_fft=2048,
             stft_hop_length=512,
-            # 10ms at 44100Hz, from sections 4.1, 4.4 in the paper - @faroit recommends // 2 or // 4 for better reconstruction
             stft_win_length=2048,
             stft_normalized=False,
             stft_window_fn: Optional[Callable] = None,
@@ -287,7 +272,7 @@ class MelBandRoformer(Module):
             multi_stft_hop_size=147,
             multi_stft_normalized=False,
             multi_stft_window_fn: Callable = torch.hann_window,
-            match_input_audio_length=False,  # if True, pad output tensor to match length of input tensor
+            match_input_audio_length=False,
     ):
         super().__init__()
 
@@ -326,23 +311,13 @@ class MelBandRoformer(Module):
 
         freqs = torch.stft(torch.randn(1, 4096), **self.stft_kwargs, return_complex=True).shape[1]
 
-        # create mel filter bank
-        # with librosa.filters.mel as in section 2 of paper
-
         mel_filter_bank_numpy = filters.mel(sr=sample_rate, n_fft=stft_n_fft, n_mels=num_bands)
 
         mel_filter_bank = torch.from_numpy(mel_filter_bank_numpy)
 
-        # for some reason, it doesn't include the first freq? just force a value for now
-
         mel_filter_bank[0][0] = 1.
 
-        # In some systems/envs we get 0.0 instead of ~1.9e-18 in the last position,
-        # so let's force a positive value
-
         mel_filter_bank[-1, -1] = 1.
-
-        # binary as in paper (then estimated masks are averaged for overlapping regions)
 
         freqs_per_band = mel_filter_bank > 0
         assert freqs_per_band.any(dim=0).all(), 'all frequencies need to be covered by all bands for now'
@@ -364,8 +339,6 @@ class MelBandRoformer(Module):
         self.register_buffer('num_freqs_per_band', num_freqs_per_band, persistent=False)
         self.register_buffer('num_bands_per_freq', num_bands_per_freq, persistent=False)
 
-        # band split and mask estimator
-
         freqs_per_bands_with_complex = tuple(2 * f * self.audio_channels for f in num_freqs_per_band.tolist())
 
         self.band_split = BandSplit(
@@ -383,8 +356,6 @@ class MelBandRoformer(Module):
             )
 
             self.mask_estimators.append(mask_estimator)
-
-        # for the multi-resolution stft loss
 
         self.multi_stft_resolution_loss_weight = multi_stft_resolution_loss_weight
         self.multi_stft_resolutions_window_sizes = multi_stft_resolutions_window_sizes
@@ -416,6 +387,12 @@ class MelBandRoformer(Module):
         d - feature dimension
         """
 
+        original_device = raw_audio.device
+        x_is_mps = True if original_device.type == 'mps' else False
+        
+        if x_is_mps:
+            raw_audio = raw_audio.cpu()
+
         device = raw_audio.device
 
         if raw_audio.ndim == 2:
@@ -428,8 +405,6 @@ class MelBandRoformer(Module):
         assert (not self.stereo and channels == 1) or (
                     self.stereo and channels == 2), 'stereo needs to be set to True if passing in audio signal that is stereo (channel dimension of 2). also need to be False if mono (channel dimension of 1)'
 
-        # to stft
-
         raw_audio, batch_audio_channel_packed_shape = pack_one(raw_audio, '* t')
 
         stft_window = self.stft_window_fn(device=device)
@@ -441,21 +416,13 @@ class MelBandRoformer(Module):
         stft_repr = rearrange(stft_repr,
                               'b s f t c -> b (f s) t c')  # merge stereo / mono into the frequency, with frequency leading dimension, for band splitting
 
-        # index out all frequencies for all frequency ranges across bands ascending in one go
-
         batch_arange = torch.arange(batch, device=device)[..., None]
 
-        # account for stereo
-
-        x = stft_repr[batch_arange, self.freq_indices]
-
-        # fold the complex (real and imag) into the frequencies dimension
+        x = stft_repr[batch_arange, self.freq_indices.cpu()] if x_is_mps else stft_repr[batch_arange, self.freq_indices]
 
         x = rearrange(x, 'b f t c -> b t (f c)')
 
         x = self.band_split(x)
-
-        # axial / hierarchical attention
 
         for time_transformer, freq_transformer in self.layers:
             x = rearrange(x, 'b t f d -> b f t d')
@@ -475,43 +442,90 @@ class MelBandRoformer(Module):
 
         masks = torch.stack([fn(x) for fn in self.mask_estimators], dim=1)
         masks = rearrange(masks, 'b n t (f c) -> b n f t c', c=2)
-
-        # modulate frequency representation
+        if x_is_mps:
+            masks = masks.cpu()
 
         stft_repr = rearrange(stft_repr, 'b f t c -> b 1 f t c')
 
-        # need to average the estimated mask for the overlapped frequencies
-        # Do this BEFORE converting to complex numbers
+        # stft_repr = torch.view_as_complex(stft_repr)
+        # masks = torch.view_as_complex(masks)
 
-        scatter_indices = repeat(self.freq_indices, 'f -> b n f t c', b=batch, n=num_stems, t=stft_repr.shape[-2], c=2)
+        masks = masks.type(stft_repr.dtype)
+        print(masks.shape, "MASKS")
+        print(stft_repr.shape, "STFT REPR")
+        print(self.freq_indices.shape, "FREQ INDICES")
+        print(batch, "BATCH")
+        print(num_stems, "NUM STEMS")
 
+        if x_is_mps:
+            scatter_indices = repeat(self.freq_indices.cpu(), 'f -> b n f t', b=batch, n=num_stems, t=stft_repr.shape[-1])
+        else:
+            scatter_indices = repeat(self.freq_indices, 'f -> b n f t', b=batch, n=num_stems, t=stft_repr.shape[-1])
         stft_repr_expanded_stems = repeat(stft_repr, 'b 1 ... -> b n ...', n=num_stems)
-        masks_summed = torch.zeros_like(stft_repr_expanded_stems).scatter_add_(2, scatter_indices, masks)
+        
+        # Handle scatter operation on real and imaginary parts separately
+        masks_real = masks[..., 0]  # Extract real part
+        masks_imag = masks[..., 1]  # Extract imaginary part
+        
+        # Create zero tensors for real and imaginary parts
+        masks_summed_real = torch.zeros_like(stft_repr_expanded_stems[..., 0])
+        masks_summed_imag = torch.zeros_like(stft_repr_expanded_stems[..., 1])
+        
+        # Perform scatter_add on real and imaginary parts separately
+        masks_summed_real.scatter_add_(2, scatter_indices, masks_real)
+        masks_summed_imag.scatter_add_(2, scatter_indices, masks_imag)
+        
+        # Reconstruct complex tensor using torch.complex (CoreML compatible)
+        masks_summed = torch.complex(masks_summed_real, masks_summed_imag)
 
-        denom = repeat(self.num_bands_per_freq, 'f -> (f r) 1 1', r=channels)
+        # Create denom tensor with the correct shape to match masks_summed
+        # We need to create denom with the same shape as masks_summed
+        # The issue is that we need to properly map the mel filter bank frequencies to the full STFT frequencies
+        # We'll use the same approach as the original code but with proper tensor shapes
+        
+        # Create a zero tensor with the same shape as masks_summed
+        denom = torch.zeros_like(masks_summed.real)
+        
+        # Use scatter_add to accumulate the num_bands_per_freq values
+        # We need to convert freq_indices back to the original frequency indices
+        if self.stereo:
+            # For stereo, freq_indices includes both channels, so we need to extract the original frequency indices
+            original_freq_indices = self.freq_indices // 2
+        else:
+            original_freq_indices = self.freq_indices
+            
+        # Create scatter indices for the denominator
+        denom_scatter_indices = repeat(original_freq_indices, 'f -> b n f t', b=batch, n=num_stems, t=stft_repr.shape[-1])
+        
+        # Create the values to scatter (num_bands_per_freq repeated for each time step)
+        denom_values = repeat(self.num_bands_per_freq, 'f -> b n f t', b=batch, n=num_stems, t=stft_repr.shape[-1])
+        
+        # Scatter the values
+        denom.scatter_add_(2, denom_scatter_indices, denom_values)
+        
+        if x_is_mps:
+            denom = denom.cpu()
 
         masks_averaged = masks_summed / denom.clamp(min=1e-8)
 
+        print(masks_averaged.shape, "MASKS AVERAGED")
+        print(stft_repr.shape, "STFT REPR")
 
-        # NOW convert to complex numbers for multiplication
-        stft_repr = torch.view_as_complex(stft_repr)
-        masks_averaged = torch.view_as_complex(masks_averaged)
 
-        masks_averaged = masks_averaged.type(stft_repr.dtype)
+        stft_real = stft_repr[..., 0]
+        stft_imag = stft_repr[..., 1]
+        mask_real = masks_averaged[..., 0]
+        mask_imag = masks_averaged[..., 1]
 
-        # modulate stft repr with estimated mask
+        # stft_repr = stft_repr * mask
+        real_part = stft_real * mask_real - stft_imag * mask_imag
+        imag_part = stft_real * mask_imag + stft_imag * mask_real
 
-        stft_repr = stft_repr * masks_averaged
+        stft_repr_real = rearrange(real_part, "b n (f s) t -> (b n s) f t", s=self.audio_channels)
+        stft_repr_imag = rearrange(imag_part, "b n (f s) t -> (b n s) f t", s=self.audio_channels)
 
-        # istft
-
-        stft_repr = rearrange(stft_repr, 'b n (f s) t -> (b n s) f t', s=self.audio_channels)
-
-        ## view as real
-        stft_repr = torch.view_as_real(stft_repr)
-
-        return stft_repr
-
+        stft_repr = torch.stack([stft_repr_real, stft_repr_imag], dim=-1)
+        
         # recon_audio = torch.istft(stft_repr, **self.stft_kwargs, window=stft_window, return_complex=False,
         #                           length=istft_length)
 
@@ -520,10 +534,8 @@ class MelBandRoformer(Module):
         # if num_stems == 1:
         #     recon_audio = rearrange(recon_audio, 'b 1 s t -> b s t')
 
-        # if a target is passed in, calculate loss for learning
-
         if not exists(target):
-            return recon_audio
+            return stft_repr
 
         if self.num_stems > 1:
             assert target.ndim == 4 and target.shape[1] == self.num_stems
@@ -531,7 +543,7 @@ class MelBandRoformer(Module):
         if target.ndim == 2:
             target = rearrange(target, '... t -> ... 1 t')
 
-        target = target[..., :recon_audio.shape[-1]]  # protect against lost length on istft
+        target = target[..., :recon_audio.shape[-1]]
 
         loss = F.l1_loss(recon_audio, target)
 
@@ -539,7 +551,7 @@ class MelBandRoformer(Module):
 
         for window_size in self.multi_stft_resolutions_window_sizes:
             res_stft_kwargs = dict(
-                n_fft=max(window_size, self.multi_stft_n_fft),  # not sure what n_fft is across multi resolution stft
+                n_fft=max(window_size, self.multi_stft_n_fft),
                 win_length=window_size,
                 return_complex=True,
                 window=self.multi_stft_window_fn(window_size, device=device),
@@ -555,7 +567,19 @@ class MelBandRoformer(Module):
 
         total_loss = loss + weighted_multi_resolution_loss
 
+
+        # Move the total loss back to the original device if necessary
+        if x_is_mps:
+            total_loss = total_loss.to(original_device)
+
         if not return_loss_breakdown:
             return total_loss
 
-        return total_loss, (loss, multi_stft_resolution_loss)
+        # If detailed loss breakdown is requested, ensure all components are on the original device
+        return total_loss, (loss.to(original_device) if x_is_mps else loss, 
+                            multi_stft_resolution_loss.to(original_device) if x_is_mps else multi_stft_resolution_loss)
+
+        # if not return_loss_breakdown:
+        #     return total_loss
+
+        # return total_loss, (loss, multi_stft_resolution_loss)

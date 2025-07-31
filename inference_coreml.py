@@ -513,16 +513,16 @@ def proc_folder(dict_args):
 
 
 if __name__ == "__main__":
-    passed_tests = ['htdemucs', 'mdx23c', 'scnet', 'bs_roformer_apple_coreml']
-    model_types = ['htdemucs', 'mdx23c', 'mel_band_roformer', 'scnet', 'bs_roformer_apple_coreml']
-    configs = ['configs/config_htdemucs_4stems.yaml', 'configs/config_vocals_mdx23c.yaml', 'configs/KimberleyJensen/config_vocals_mel_band_roformer_kj.yaml', 'configs/config_musdb18_scnet_large_starrytong.yaml', 'configs/config_v1_apple_model.yaml']
-    checkpoints = ['checkpoints/demucs.th', 'checkpoints/model_vocals_mdx23c_sdr_10.17.ckpt', 'checkpoints/MelBandRoformer.ckpt', 'checkpoints/SCNet-large_starrytong_fixed.ckpt', 'checkpoints/logic_roformer-fp16.pt']
+    # passed_tests = ['htdemucs', 'mdx23c', 'mel_band_roformer', 'scnet', 'bs_roformer_apple_coreml']
+    model_types = ['htdemucs', 'mdx23c', 'mel_band_roformer', 'scnet', 'bs_roformer_apple_coreml', 'bs_roformer']
+    configs = ['configs/config_htdemucs_4stems.yaml', 'configs/config_mdx23c.yaml', 'configs/KimberleyJensen/config_vocals_mel_band_roformer_kj.yaml', 'configs/config_musdb18_scnet_large_starrytong.yaml', 'configs/config_v1_apple_model.yaml', 'configs/viperx/model_bs_roformer_ep_317_sdr_12.9755.yaml']
+    checkpoints = ['checkpoints/demucs.th', 'checkpoints/drumsep_5stems_mdx23c_jarredou.ckpt', 'checkpoints/MelBandRoformer.ckpt', 'checkpoints/SCNet-large_starrytong_fixed.ckpt', 'checkpoints/logic_roformer-fp16.pt', 'checkpoints/model_bs_roformer_ep_317_sdr_12.9755.ckpt']
     input_folder = 'test_data/'
     store_dir = 'test_data/results'
     for model_type, config, checkpoint in zip(model_types, configs, checkpoints):
-        if model_type in passed_tests:
-            print(f"Skipping {model_type} as it has already passed tests.")
-            continue
+        # if model_type in passed_tests:
+        #     print(f"Skipping {model_type} as it has already passed tests.")
+        #     continue
         print(f"Processing {model_type} with config {config} and checkpoint {checkpoint}")
         proc_folder({
             'model_type': model_type,

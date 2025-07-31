@@ -441,9 +441,12 @@ class HTDemucs(nn.Module):
         pad = hl // 2 * 3
         x = pad1d(x, (pad, pad + le * hl - x.shape[-1]), mode="reflect")
 
-        z = spectro(x, nfft, hl)[..., :-1, :]
-        assert z.shape[-1] == le + 4, (z.shape, x.shape, le)
-        z = z[..., 2: 2 + le]
+        z = spectro(x, nfft, hl)
+        real_part = z.real[..., :-1, :]
+        imag_part = z.imag[..., :-1, :]
+        real_part = real_part[..., 2: 2 + le]
+        imag_part = imag_part[..., 2: 2 + le]
+        z = torch.complex(real_part, imag_part)
         return z
 
     def _ispec(self, z, length=None, scale=0):
@@ -489,9 +492,20 @@ class HTDemucs(nn.Module):
         # If `cac` is True, `m` is actually a full spectrogram and `z` is ignored.
         niters = self.wiener_iters
         if self.cac:
-            B, S, C, Fr, T = m.shape
-            out = m.view(B, S, -1, 2, Fr, T).permute(0, 1, 2, 4, 5, 3)
-            out = torch.view_as_complex(out.contiguous())
+            B, S, C, Fr, T = m.shape # B, S, C, Fr, T
+            print(m.shape, "M")
+            out = m.view(B, S, -1, 2, Fr*T) ## becomes B, S, C/2, 2, Fr, T
+            print(out.shape, "OUT")
+
+            out = out.permute(0, 1, 2, 4, 3) ## becomes B, S, C/2, Fr*T, 2
+            print(out.shape, "OUT PERMUTED")
+            out_real = out[..., 0] ## B, S, C/2, Fr*T
+            out_imag = out[..., 1] ## B, S, C/2, Fr*T
+
+            out_real = out_real.view(B, S, -1, Fr, T) ## B, S, C/2, Fr, T
+            out_imag = out_imag.view(B, S, -1, Fr, T) ## B, S, C/2, Fr, T
+
+            out = torch.complex(out_real, out_imag).contiguous() ## B, S, C/2, Fr, T
             return out
         if self.training:
             niters = self.end_iters

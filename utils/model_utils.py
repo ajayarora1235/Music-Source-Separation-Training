@@ -494,7 +494,7 @@ def load_start_checkpoint(args: argparse.Namespace, model: torch.nn.Module, type
         except RuntimeError as e:
             if "size mismatch" in str(e):
                 print(f"Shape mismatch detected, using compatible weight loading: {e}")
-                load_not_compatible_weights(model, args.start_check_point, verbose=True)
+                load_not_compatible_weights(model, args.start_check_point, verbose=False)
             else:
                 raise e
 
