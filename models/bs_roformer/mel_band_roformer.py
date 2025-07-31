@@ -37,6 +37,103 @@ def pad_at_dim(t, pad, dim=-1, value=0.):
     zeros = ((0, 0) * dims_from_right)
     return F.pad(t, (*zeros, *pad), value=value)
 
+def manual_scatter_add_exact(masks, scatter_indices, stft_repr_expanded_stems, x_is_mps=False):
+    """
+    Manual implementation that gives exact same results as scatter_add_
+    Fixed for your actual tensor shapes
+    """
+    # Your shapes:
+    # masks: [B, N, freq_bands, T, 2] (complex dimension at end)
+    # scatter_indices: [B, N, freq_bands, T] 
+    # stft_repr_expanded_stems: [B, N, target_freq_size, T, 2]
+    
+    B, N, freq_bands, T, _ = masks.shape
+    target_freq_size = stft_repr_expanded_stems.shape[2]
+    
+    # Extract real and imaginary parts
+    masks_real = masks[..., 0]  # [B, N, freq_bands, T]
+    masks_imag = masks[..., 1]  # [B, N, freq_bands, T]
+    
+    # Initialize output tensors (equivalent to the original zero tensors)
+    masks_summed_real = torch.zeros(B, N, target_freq_size, T, 
+                                   device=masks.device, dtype=masks_real.dtype)
+    masks_summed_imag = torch.zeros(B, N, target_freq_size, T, 
+                                   device=masks.device, dtype=masks_imag.dtype)
+    
+    print(scatter_indices.shape, "SCATTER INDICES")
+    
+    # Manual scatter - this is mathematically identical to scatter_add_
+    for b in range(B):
+        for n in range(N):
+            for band in range(freq_bands):
+                for t in range(T):
+                    # Get the target frequency index for this band
+                    if x_is_mps:
+                        freq_idx = scatter_indices[b, n, band, t].cpu().item()
+                    else:
+                        freq_idx = scatter_indices[b, n, band, t].item()
+                    
+                    # Bounds check (defensive programming)
+                    if 0 <= freq_idx < target_freq_size:
+                        # Add the mask values to the target frequency bin
+                        masks_summed_real[b, n, freq_idx, t] += masks_real[b, n, band, t]
+                        masks_summed_imag[b, n, freq_idx, t] += masks_imag[b, n, band, t]
+    
+    return torch.stack([masks_summed_real, masks_summed_imag], dim=-1)
+
+def fast_vectorized_scatter(masks, scatter_indices, stft_repr_expanded_stems, x_is_mps=False):
+    """
+    Fast vectorized implementation using advanced indexing
+    Should be nearly as fast as the original scatter_add operations
+    """
+    B, N, freq_bands, T, _ = masks.shape
+    target_freq_size = stft_repr_expanded_stems.shape[2]
+    
+    # Fix scatter_indices shape if needed
+    if scatter_indices.shape[-1] != T:
+        scatter_indices = scatter_indices[:, :, :, 0:1].expand(B, N, freq_bands, T)
+    
+    # Extract real and imaginary parts
+    masks_real = masks[..., 0]  # [B, N, freq_bands, T]
+    masks_imag = masks[..., 1]  # [B, N, freq_bands, T]
+    
+    # Initialize output tensors
+    masks_summed_real = torch.zeros(B, N, target_freq_size, T, 
+                                   device=masks.device, dtype=masks_real.dtype)
+    masks_summed_imag = torch.zeros(B, N, target_freq_size, T, 
+                                   device=masks.device, dtype=masks_imag.dtype)
+    
+    # Create index tensors for advanced indexing
+    batch_idx = torch.arange(B, device=masks.device).view(B, 1, 1, 1).expand(B, N, freq_bands, T)
+    stem_idx = torch.arange(N, device=masks.device).view(1, N, 1, 1).expand(B, N, freq_bands, T)
+    time_idx = torch.arange(T, device=masks.device).view(1, 1, 1, T).expand(B, N, freq_bands, T)
+    
+    # Flatten for vectorized operations
+    batch_flat = batch_idx.flatten()
+    stem_flat = stem_idx.flatten()
+    freq_flat = scatter_indices.flatten()
+    time_flat = time_idx.flatten()
+    masks_real_flat = masks_real.flatten()
+    masks_imag_flat = masks_imag.flatten()
+    
+    # Filter out invalid indices (bounds check)
+    valid_mask = (freq_flat >= 0) & (freq_flat < target_freq_size)
+    if valid_mask.sum() < valid_mask.numel():
+        batch_flat = batch_flat[valid_mask]
+        stem_flat = stem_flat[valid_mask]
+        freq_flat = freq_flat[valid_mask]
+        time_flat = time_flat[valid_mask]
+        masks_real_flat = masks_real_flat[valid_mask]
+        masks_imag_flat = masks_imag_flat[valid_mask]
+    
+    # Use advanced indexing for fast scatter
+    masks_summed_real[batch_flat, stem_flat, freq_flat, time_flat] += masks_real_flat
+    masks_summed_imag[batch_flat, stem_flat, freq_flat, time_flat] += masks_imag_flat
+    
+    return torch.stack([masks_summed_real, masks_summed_imag], dim=-1)
+
+
+
 class RMSNorm(Module):
     def __init__(self, dim):
         super().__init__()
@@ -458,9 +555,9 @@ class MelBandRoformer(Module):
         print(num_stems, "NUM STEMS")
 
         if x_is_mps:
-            scatter_indices = repeat(self.freq_indices.cpu(), 'f -> b n f t', b=batch, n=num_stems, t=stft_repr.shape[-1])
+            scatter_indices = repeat(self.freq_indices.cpu(), 'f -> b n f t', b=batch, n=num_stems, t=stft_repr.shape[-2])
         else:
-            scatter_indices = repeat(self.freq_indices, 'f -> b n f t', b=batch, n=num_stems, t=stft_repr.shape[-1])
+            scatter_indices = repeat(self.freq_indices, 'f -> b n f t', b=batch, n=num_stems, t=stft_repr.shape[-2])
         stft_repr_expanded_stems = repeat(stft_repr, 'b 1 ... -> b n ...', n=num_stems)
         
         # Handle scatter operation on real and imaginary parts separately
@@ -472,45 +569,32 @@ class MelBandRoformer(Module):
         masks_summed_imag = torch.zeros_like(stft_repr_expanded_stems[..., 1])
         
         # Perform scatter_add on real and imaginary parts separately
-        masks_summed_real.scatter_add_(2, scatter_indices, masks_real)
-        masks_summed_imag.scatter_add_(2, scatter_indices, masks_imag)
+
+        #masks_summed_real = masks_summed_real.scatter(2, scatter_indices, masks_real, reduce='add')
+        #masks_summed_imag = masks_summed_imag.scatter(2, scatter_indices, masks_imag, reduce='add')
+
+        masks_summed = fast_vectorized_scatter(
+            masks, 
+            scatter_indices, 
+            stft_repr_expanded_stems,
+            x_is_mps
+        )
+
+        #masks_summed_real = masks_summed_real.scatter_add(2, scatter_indices, masks_real)
+       # masks_summed_imag = masks_summed_imag.scatter_add(2, scatter_indices, masks_imag)
         
         # Reconstruct complex tensor using torch.complex (CoreML compatible)
-        masks_summed = torch.complex(masks_summed_real, masks_summed_imag)
+        masks_summed = torch.stack([masks_summed_real, masks_summed_imag], dim=-1)
 
-        # Create denom tensor with the correct shape to match masks_summed
-        # We need to create denom with the same shape as masks_summed
-        # The issue is that we need to properly map the mel filter bank frequencies to the full STFT frequencies
-        # We'll use the same approach as the original code but with proper tensor shapes
-        
-        # Create a zero tensor with the same shape as masks_summed
-        denom = torch.zeros_like(masks_summed.real)
-        
-        # Use scatter_add to accumulate the num_bands_per_freq values
-        # We need to convert freq_indices back to the original frequency indices
-        if self.stereo:
-            # For stereo, freq_indices includes both channels, so we need to extract the original frequency indices
-            original_freq_indices = self.freq_indices // 2
-        else:
-            original_freq_indices = self.freq_indices
-            
-        # Create scatter indices for the denominator
-        denom_scatter_indices = repeat(original_freq_indices, 'f -> b n f t', b=batch, n=num_stems, t=stft_repr.shape[-1])
-        
-        # Create the values to scatter (num_bands_per_freq repeated for each time step)
-        denom_values = repeat(self.num_bands_per_freq, 'f -> b n f t', b=batch, n=num_stems, t=stft_repr.shape[-1])
-        
-        # Scatter the values
-        denom.scatter_add_(2, denom_scatter_indices, denom_values)
+        denom = repeat(self.num_bands_per_freq, 'f -> (f r) 1', r=channels)
+
         
         if x_is_mps:
             denom = denom.cpu()
 
+        denom = denom.unsqueeze(-1)
         masks_averaged = masks_summed / denom.clamp(min=1e-8)
-
-        print(masks_averaged.shape, "MASKS AVERAGED")
-        print(stft_repr.shape, "STFT REPR")
-
+        # masks_averaged = torch.view_as_real(masks_averaged)
 
         stft_real = stft_repr[..., 0]
         stft_imag = stft_repr[..., 1]

@@ -8,6 +8,12 @@ import argparse
 from utils.model_utils import prefer_target_instrument, apply_tta, load_start_checkpoint
 from utils.settings import get_model_from_config
 
+
+# Register a composite operator that maps PyTorch scatter_add to CoreML's ScatterAlongAxis
+from coremltools.converters.mil.frontend.torch.torch_op_registry import register_torch_op, _TORCH_OPS_REGISTRY
+from coremltools.converters.mil.frontend.torch.ops import _get_inputs
+from coremltools.converters.mil import Builder as mb
+
 def convert_to_coreml(model_type, config_path, start_check_point):
     model, config = get_model_from_config(model_type, config_path)
 
@@ -56,7 +62,7 @@ def convert_to_coreml(model_type, config_path, start_check_point):
     model_from_trace.save(f"{model_type}.mlpackage")
 
 def main():
-    passed_tests = ['htdemucs','mdx23c', 'scnet', 'bs_roformer_apple_coreml', 'bs_roformer']
+    passed_tests = ['mdx23c', 'mel_band_roformer', 'scnet', 'bs_roformer_apple_coreml', 'bs_roformer']
     model_types = ['htdemucs', 'mdx23c', 'mel_band_roformer', 'scnet', 'bs_roformer_apple_coreml', 'bs_roformer']
     configs = ['configs/config_htdemucs_4stems.yaml', 'configs/config_mdx23c.yaml', 'configs/KimberleyJensen/config_vocals_mel_band_roformer_kj.yaml', 'configs/config_musdb18_scnet_large_starrytong.yaml', 'configs/config_v1_apple_model.yaml', 'configs/viperx/model_bs_roformer_ep_317_sdr_12.9755.yaml']
     checkpoints = ['checkpoints/demucs.th', 'checkpoints/drumsep_5stems_mdx23c_jarredou.ckpt', 'checkpoints/MelBandRoformer.ckpt', 'checkpoints/SCNet-large_starrytong_fixed.ckpt', 'checkpoints/logic_roformer-fp16.pt', 'checkpoints/model_bs_roformer_ep_317_sdr_12.9755.ckpt']
@@ -65,10 +71,9 @@ def main():
         if model_type in passed_tests:
             print(f"Skipping {model_type} as it has already passed tests.")
             continue
-        try:
-            convert_to_coreml(model_type, config_path, checkpoint)
-        except Exception as e:
-            print(f"Error converting {model_type} to CoreML: {e}")
+        convert_to_coreml(model_type, config_path, checkpoint)
+        # except Exception as e:
+         #   print(f"Error converting {model_type} to CoreML: {e}")
 
 if __name__ == "__main__":
     main()
