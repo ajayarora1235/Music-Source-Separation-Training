@@ -1,67 +1,77 @@
-# Music Source Separation Universal Training Code
+# Music Source Separation CoreML Model Creation
 
-Repository for training models for music source separation. Repository is based on [kuielab code](https://github.com/kuielab/sdx23/tree/mdx_AB/my_submission/src) for [SDX23 challenge](https://github.com/kuielab/sdx23/tree/mdx_AB/my_submission/src). The main idea of this repository is to create training code, which is easy to modify for experiments. Brought to you by [MVSep.com](https://mvsep.com).
+Repository for creating CoreML models for music source separation for on-device inference. This repository enables conversion of trained music source separation models to CoreML format for efficient execution on Apple devices.
 
-## Models
+**Thanks to [ZFTurbo](https://github.com/ZFTurbo) for the original model and inference implementations.**
 
-Model can be chosen with `--model_type` arg.
+## Compatible Models
 
-Available models for training:
+Currently compatible models for CoreML conversion:
 
-* MDX23C based on [KUIELab TFC TDF v3 architecture](https://github.com/kuielab/sdx23/). Key: `mdx23c`.
-* Demucs4HT [[Paper](https://arxiv.org/abs/2211.08553)]. Key: `htdemucs`.
-* VitLarge23 based on [Segmentation Models Pytorch](https://github.com/qubvel/segmentation_models.pytorch). Key: `segm_models`.
-* TorchSeg based on [TorchSeg module](https://github.com/qubvel/segmentation_models.pytorch). Key: `torchseg`.
-* Band Split RoFormer [[Paper](https://arxiv.org/abs/2309.02612), [Repository](https://github.com/lucidrains/BS-RoFormer)] . Key: `bs_roformer`.
-* Mel-Band RoFormer [[Paper](https://arxiv.org/abs/2310.01809), [Repository](https://github.com/lucidrains/BS-RoFormer)]. Key: `mel_band_roformer`.
-* Swin Upernet [[Paper](https://arxiv.org/abs/2103.14030)] Key: `swin_upernet`.
-* BandIt Plus [[Paper](https://arxiv.org/abs/2309.02539), [Repository](https://github.com/karnwatcharasupat/bandit)] Key: `bandit`.
-* SCNet [[Paper](https://arxiv.org/abs/2401.13276), [Official Repository](https://github.com/starrytong/SCNet), [Unofficial Repository](https://github.com/amanteur/SCNet-PyTorch)] Key: `scnet`.
-* BandIt v2 [[Paper](https://arxiv.org/abs/2407.07275), [Repository](https://github.com/kwatcharasupat/bandit-v2)] Key: `bandit_v2`.
-* Apollo [[Paper](https://arxiv.org/html/2409.08514v1), [Repository](https://github.com/JusperLee/Apollo)] Key: `apollo`.
-* TS BSMamba2 [[Paper](https://arxiv.org/pdf/2409.06245), [Repository](https://github.com/baijinglin/TS-BSmamba2)] Key: `bs_mamba2`.
-* SCNet Tran Key: `scnet_tran`.
-* SCNet Masked Key: `scnet_masked`.
+* **MDX23C** based on [KUIELab TFC TDF v3 architecture](https://github.com/kuielab/sdx23/). Key: `mdx23c`.
+* **Demucs4HT** [[Paper](https://arxiv.org/abs/2211.08553)]. Key: `htdemucs`.
+* **Band Split RoFormer** [[Paper](https://arxiv.org/abs/2309.02612), [Repository](https://github.com/lucidrains/BS-RoFormer)] . Key: `bs_roformer`.
+* **Mel-Band RoFormer** [[Paper](https://arxiv.org/abs/2310.01809), [Repository](https://github.com/lucidrains/BS-RoFormer)]. Key: `mel_band_roformer`.
+* **SCNet** [[Paper](https://arxiv.org/abs/2401.13276), [Official Repository](https://github.com/starrytong/SCNet), [Unofficial Repository](https://github.com/amanteur/SCNet-PyTorch)] Key: `scnet`.
 
-1. **Note 1**: For `segm_models` there are many different encoders is possible. [Look here](https://github.com/qubvel/segmentation_models.pytorch#encoders-).
-2. **Note 2**: Thanks to [@lucidrains](https://github.com/lucidrains) for recreating the RoFormer models based on papers.
-3. **Note 3**: For `torchseg` gives access to more than 800 encoders from `timm` module. It's similar to `segm_models`.
+**Note**: Thanks to [@lucidrains](https://github.com/lucidrains) for recreating the RoFormer models based on papers.
 
-## How to: Train
+## How to: CoreML Conversion
 
-To train model you need to:
+To convert a trained model to CoreML format:
 
-1) Choose model type with option `--model_type`, including: `mdx23c`, `htdemucs`, `segm_models`, `mel_band_roformer`, `bs_roformer`.
-2) Choose location of config for model `--config_path` `<config path>`. You can find examples of configs in [configs folder](configs/). Prefixes `config_musdb18_` are examples for [MUSDB18 dataset](https://sigsep.github.io/datasets/musdb.html).
-3) If you have a check-point from the same model or from another similar model you can use it with option: `--start_check_point` `<weights path>`
-4) Choose path where to store results of training `--results_path` `<results folder path>`
-
-### Training example
-
+1) Run the model conversion script:
 ```bash
-python train.py \
-    --model_type mel_band_roformer \
-    --config_path configs/config_mel_band_roformer_vocals.yaml \
-    --start_check_point results/model.ckpt \
-    --results_path results/ \
-    --data_path 'datasets/dataset1' 'datasets/dataset2' \
-    --valid_path datasets/musdb18hq/test \
-    --num_workers 4 \
-    --device_ids 0
+python model_coreml_conversion.py \
+    --model_type <model_type> \
+    --config_path <config_path> \
+    --checkpoint <checkpoint_path>
 ```
 
-All training parameters are [here](https://github.com/ZFTurbo/Music-Source-Separation-Training/blob/main/train.py#L45).
+2) Since iSTFT is not supported by CoreML, you must export it separately:
+```bash
+python istft_coreml_conversion.py \
+    --model_type <model_type> \
+    --config_path <config_path> \
+    --checkpoint <checkpoint_path>
+```
 
-### Training with LoRA
+### Conversion Example
 
-Look here: [LoRA training](docs/LoRA.md)
+```bash
+# Convert the main model
+python model_coreml_conversion.py \
+    --model_type mel_band_roformer \
+    --config_path configs/config_mel_band_roformer_vocals.yaml \
+    --checkpoint results/model.ckpt
+
+# Convert the iSTFT component separately
+python istft_coreml_conversion.py \
+    --model_type mel_band_roformer \
+    --config_path configs/config_mel_band_roformer_vocals.yaml \
+    --checkpoint results/model.ckpt
+```
+
+## How to: Testing
+
+To test your converted CoreML models:
+
+```bash
+python test_coreml_conversion.py <path_to_model.mlpackage> <path_to_istft.mlpackage>
+```
+
+### Testing Example
+
+```bash
+python test_coreml_conversion.py model.mlpackage istft.mlpackage
+```
 
 ## How to: Inference
 
-### Inference example
+For regular inference without CoreML to test modules, you can run:
 
 ```bash
-python inference.py \
+python inference_coreml.py \
     --model_type mdx23c \
     --config_path configs/config_mdx23c_musdb18.yaml \
     --start_check_point results/last_mdx23c.ckpt \
@@ -69,12 +79,14 @@ python inference.py \
     --store_dir separation_results/
 ```
 
-All inference parameters are [here](https://github.com/ZFTurbo/Music-Source-Separation-Training/blob/main/inference.py#L108).
+This uses the same arguments as the original `inference.py` script.
 
 ## Useful notes
 
-* All batch sizes in config are adjusted to use with single NVIDIA A6000 48GB. If you have less memory please adjust correspodningly in model config `training.batch_size` and `training.gradient_accumulation_steps`.
-* It's usually always better to start with old weights even if shapes not fully match. Code supports loading weights for not fully same models (but it must have the same architecture). Training will be much faster.
+* CoreML models are optimized for on-device inference on Apple hardware (iOS, macOS).
+* The iSTFT component must be exported separately due to CoreML limitations.
+* For fastest runtime performance, consider implementing iSTFT directly in Swift or C++. The iSTFT conversion provided here is for convenience.
+* Make sure you have the necessary dependencies installed for CoreML conversion.
 
 ## Code description
 
